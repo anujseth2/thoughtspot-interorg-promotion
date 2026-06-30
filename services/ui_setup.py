@@ -21,8 +21,16 @@ TARGETS_PATH = ROOT / "variables" / "targets.json"   # legacy, migrated on first
 # env keys written/read (the cluster host + the DEFAULT credential + non-org settings);
 # per-org credentials live in orgs.json, not here.
 ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_SECRET_KEY",
+            "TS_CA_BUNDLE", "TS_VERIFY_SSL",
             "TS_ORG_PRIMARY", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
             "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH"]
+
+
+def _verify_from_cfg(cfg: dict):
+    ca = (cfg.get("ca_bundle") or "").strip()
+    if ca:
+        return ca
+    return False if cfg.get("verify_ssl", True) is False else True
 
 
 def make_client(cfg: dict, org_id="") -> TSClient:
@@ -30,7 +38,8 @@ def make_client(cfg: dict, org_id="") -> TSClient:
     credential reaches every org (a token is minted per org_id at connect time)."""
     return TSClient(host=cfg["host"], org_id=str(org_id),
                     username=cfg.get("user", ""), password=cfg.get("password", ""),
-                    token=cfg.get("token", ""), secret_key=cfg.get("secret", ""))
+                    token=cfg.get("token", ""), secret_key=cfg.get("secret", ""),
+                    verify=_verify_from_cfg(cfg))
 
 
 def list_orgs(cfg: dict):
@@ -105,6 +114,8 @@ def env_values(cfg: dict) -> dict:
         "TS_PASSWORD": cfg.get("password", ""),
         "TS_TOKEN": cfg.get("token", ""),
         "TS_SECRET_KEY": cfg.get("secret", ""),
+        "TS_CA_BUNDLE": cfg.get("ca_bundle", ""),
+        "TS_VERIFY_SSL": "" if cfg.get("verify_ssl", True) else "false",
         "TS_ORG_PRIMARY": str(cfg.get("primary_org", "0")),
         "TS_ORG_SOURCE": str(cfg.get("source_org", "")),
         "TS_RELEASE_TAG": cfg.get("tag", ""),

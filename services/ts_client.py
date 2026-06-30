@@ -18,13 +18,20 @@ MODEL_SUBTYPE = "PRIVATE_WORKSHEET"
 class TSClient:
     def __init__(self, host: str, token: str = "",
                  username: str = "", password: str = "", org_id: str = "",
-                 secret_key: str = ""):
+                 secret_key: str = "", verify=True):
         self.host      = host.rstrip("/")
         self._username = username
         self._password = password
         self._secret   = secret_key
         self._org_id   = org_id
         self._session  = requests.Session()
+        # verify: True (default), a path to a CA bundle (PEM), or False to skip verification.
+        # Set it BEFORE any auth call (token mint) below. False is for a trusted corporate
+        # TLS-inspection proxy that re-signs HTTPS with an internal CA Python doesn't know.
+        self._session.verify = verify
+        if verify is False:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._session.headers.update({
             "Content-Type": "application/json",
             "Accept": "application/json",

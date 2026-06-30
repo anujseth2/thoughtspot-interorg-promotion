@@ -54,6 +54,18 @@ def _orgs_config() -> dict:
         return {}
 
 
+def _verify():
+    """TLS verification for every request: a CA bundle path (TS_CA_BUNDLE) if set, else
+    False when TS_VERIFY_SSL is off (trusted corporate proxy), else True. Lets the tool work
+    behind a TLS-inspection proxy without depending on pip-system-certs / the OS trust store."""
+    ca = os.environ.get("TS_CA_BUNDLE", "").strip()
+    if ca:
+        return ca
+    if os.environ.get("TS_VERIFY_SSL", "").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 def _primary_org() -> str:
     """Org that manages the variables: the org tagged role 'variables' in orgs.json,
     else TS_ORG_PRIMARY (default 0)."""
@@ -64,11 +76,11 @@ def _primary_org() -> str:
 
 
 def primary_client() -> TSClient:
-    return TSClient(host=os.environ["TS_HOST"], org_id=_primary_org(), **_auth())
+    return TSClient(host=os.environ["TS_HOST"], org_id=_primary_org(), verify=_verify(), **_auth())
 
 
 def org_client(org) -> TSClient:
-    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), **_auth())
+    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **_auth())
 
 
 def git():

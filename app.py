@@ -67,9 +67,22 @@ with tabs[0]:
                                 "it manages variables unless an org below is tagged 'variables')",
                                 value=os.environ.get("TS_ORG_PRIMARY", "0"))
 
+    with st.expander("Network / SSL (only if behind a corporate proxy)"):
+        st.caption("Use this if connecting fails with CERTIFICATE_VERIFY_FAILED. A TLS-inspection "
+                   "proxy re-signs HTTPS with an internal CA that Python doesn't trust by default. "
+                   "Point at your corporate CA bundle (recommended), or disable verification as a "
+                   "last resort on a trusted network.")
+        ca_bundle = st.text_input("CA bundle path (.pem)", value=os.environ.get("TS_CA_BUNDLE", ""),
+                                  placeholder="C:\\path\\to\\corporate-ca.pem")
+        disable_verify = st.checkbox(
+            "Disable SSL verification (insecure - trusted corporate proxy only)",
+            value=os.environ.get("TS_VERIFY_SSL", "").strip().lower() in ("0", "false", "no", "off"))
+    verify_ssl = not disable_verify
+
     def _cfg() -> dict:
         return {"host": host.rstrip("/"), "user": user, "secret": secret, "token": token,
                 "password": password, "primary_org": primary_org,
+                "ca_bundle": ca_bundle, "verify_ssl": verify_ssl,
                 "tag": ss.get("tag", ""), "resolve_local": ss.get("resolve_local", True),
                 "git_local_dir": ss.get("git_local_dir", ""),
                 "github_repo": ss.get("github_repo", ""), "github_token": ss.get("github_token", ""),
