@@ -3,3 +3,9 @@ requests>=2.31
 pyyaml>=6.0
 python-dotenv>=1.0
 PyGithub>=2.1
+# Makes Python trust the OS certificate store. Needed behind a corporate TLS-inspection
+# proxy (e.g. on a locked-down VM), where HTTPS is re-signed by an internal CA that
+# Python's bundled certs don't know - otherwise connecting fails with
+# "CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain".
+# Harmless elsewhere; it activates automatically once installed (no code change).
+pip-system-certs>=4.0
