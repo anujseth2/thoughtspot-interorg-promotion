@@ -1,0 +1,25 @@
+obj_id: orders_overview
+liveboard:
+  name: Orders Overview
+  visualizations:
+  - id: Viz_1
+    answer:
+      name: Total Price by Order Priority
+      tables:
+      - name: Orders Model
+        obj_id: orders_model
+      search_query: "[Order Priority] [Total Price]"
+      answer_columns:
+      - name: Order Priority
+      - name: Total Price
+      table:
+        table_columns:
+        - column_id: Order Priority
+        - column_id: Total Price
+        ordered_column_ids:
+        - Order Priority
+        - Total Price
+  layout:
+    tiles:
+    - visualization_id: Viz_1
+      size: LARGE

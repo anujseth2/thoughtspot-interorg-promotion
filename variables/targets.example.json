@@ -1,0 +1,15 @@
+{
+  "__doc__": "Copy to targets.json (git-ignored) and edit. One entry per target org: a friendly name, its org_id, the CONNECTION NAME in that org (for the connection remap on deploy), and the per-org variable values (used by setup_vars).",
+  "dev": {
+    "name": "Anuj Git Dev",
+    "org_id": "790309399",
+    "connection": "DB Dev",
+    "values": { "ts_db": "samples", "ts_schema": "bakehouse" }
+  },
+  "prod": {
+    "name": "Anuj Git Prod",
+    "org_id": "1980606475",
+    "connection": "DB Prod",
+    "values": { "ts_db": "samples", "ts_schema": "bakehouse" }
+  }
+}

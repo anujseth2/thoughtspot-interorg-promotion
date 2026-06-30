@@ -1,0 +1,5 @@
+streamlit>=1.30
+requests>=2.31
+pyyaml>=6.0
+python-dotenv>=1.0
+PyGithub>=2.1
