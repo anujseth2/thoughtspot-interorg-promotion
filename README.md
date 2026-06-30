@@ -1,79 +1,106 @@
-# ThoughtSpot Inter-Org Promotion (variable-based)
+# ThoughtSpot Inter-Org Promotion
 
-Promote ThoughtSpot content **across orgs** (e.g. a Primary authoring org → Dev/QA orgs
-→ Production tenant orgs) by publishing **one parameterized set of TML** and letting
-each org supply its own values through ThoughtSpot **Variables**.
+Promote ThoughtSpot content (Liveboards, Answers, Models, and the Tables they depend on)
+from one org to another. Instead of hand-editing a copy for each org, you publish **one
+parameterized release** and each target org binds it to its own data. The same release
+deploys to every org and produces the same content, pointed at that org's database.
 
-This is the cross-org companion to the intra-org area-promotion tool. The difference is
-how per-environment differences are handled: instead of rewriting connection/database
-names for each target, the TML carries `${variable}` tokens and each org is assigned its
-own values.
+## How it works
 
-## Why variables
-ThoughtSpot's rule for TML that is portable across orgs is two things:
-1. **obj_id** present — the stable object identity across orgs (we keep it; `guid` is
-   stripped because it is cluster-unique).
-2. Per-org-varying fields **parameterized with `${...}`** — values are assigned per org
-   via the Variable API and resolved at import/runtime.
+- **Stable identity, disposable cluster id.** Each object keeps its `obj_id` (its
+  cross-org identity, matched on import) and has its `guid` (cluster-specific) stripped.
+  So the first deploy creates the object and a later deploy of the same release updates it
+  in place instead of duplicating. Promotion is repeatable.
+- **Parameterized data binding.** The only per-org differences (database and schema) are
+  replaced with `${ts_db}` / `${ts_schema}`. Each target org supplies its own values; the
+  connection is pointed at that org's connection by name on deploy.
+- **One credential reaches every org.** Connect once with a trusted-auth secret for an
+  admin of the Primary org; the tool mints a short-lived token per org as it works. No
+  per-org credentials.
+- **Safe by construction.** Every deploy validates first and imports only if validation
+  passes. It never deletes. Re-running is idempotent.
 
-So one `release/` of TML deploys everywhere; org A and org B just hold different values.
+## Two repositories, two jobs
 
-```yaml
-table:
-  name: Orders
-  db: ${ts_db}        # TABLE_MAPPING variable
-  schema: ${ts_schema}
-  db_table: ORDERS
-  connection: { name: Snowflake }
-obj_id: orders
-```
+| Repo | Holds | Notes |
+|------|-------|-------|
+| **This repo (source)** | the tool's code | what you clone and run |
+| **Release store** (separate) | the parameterized `release/` snapshots | a different GitHub repo *or* a local folder you configure |
 
-## Flow
-| Verb | What it does |
-|------|--------------|
-| **snapshot** | export the authoring org's objects (or the seed) → parameterize (db/schema → `${...}`, keep obj_id) → commit `release/` + a variable manifest |
-| **setup_vars** | create the TABLE_MAPPING variables in the **Primary** org and assign each target org its values |
-| **deploy** | import `release/` into a target org; that org's values resolve the tokens |
+The release store is **not** this repo. Point it at a separate repo (`GITHUB_REPO`) or a
+local folder (`GIT_LOCAL_DIR`). Never point it at this source repo, or snapshots will be
+committed into the code.
+
+## Quick start (web UI)
 
 ```bash
-python scripts/snapshot.py --source-org <DEV org id> --tag <release tag>   # build release/ from an org
-#   or: python scripts/snapshot.py --from-seed                # build release/ from the bundled sample
-python scripts/setup_vars.py                                 # create vars + per-org values (reads variables/targets.json)
-python scripts/deploy.py --target dev --validate-only        # validate against a target first
-python scripts/deploy.py --target dev                        # deploy to the Dev target
-python scripts/deploy.py --target ryans_specialty            # deploy to a Production tenant target
-#   targets (dev, ryans_specialty, ...) are keys in variables/targets.json
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## Setup
-1. Python 3.9+: `python -m venv venv && source venv/bin/activate && pip install -r requirements.txt`
-2. `cp .env.example .env` and fill it in (TS creds, `TS_ORG_PRIMARY`, `GITHUB_REPO`, `GITHUB_TOKEN`).
-3. `cp variables/targets.example.json variables/targets.json` and add one entry per target org: a friendly name, its `org_id`, the `connection` name in that org, and `values` (`ts_db` / `ts_schema`).
+Then, in the **Setup** tab:
 
-## Prerequisites / dependencies
-- **Variables managed from the Primary org by an admin.** Creating variables in a tenant
-  org returns 403; do it in Primary (`TS_ORG_PRIMARY=0`).
-- The **Variables feature** must be enabled on the cluster (some variants need ThoughtSpot
-  Support to switch on).
-- For true environment **isolation**, pair this with **per-org secret keys** (each
-  environment's token service holds only its own org's secret) and **per-org CORS** — see
-  the Access Provisioning & Admin Runbook.
-- Connections are assumed to exist per org (same name/obj_id). Connection properties can
-  also be parameterized via `CONNECTION_PROPERTY` variables if you promote connections.
+1. **Step 1 - Primary connection.** Enter the host and a trusted-auth secret for an admin
+   of the Primary org. Click **Test connection & load orgs**.
+2. **Step 2 - Orgs in this promotion.** Pick the orgs involved and set each one's **role**
+   (`source` / `variables` / `target`); for targets, set the **connection** and the
+   **database/schema** it reads from.
+3. **Git store.** Choose **Local folder** or a **GitHub repo** (the release store), and
+   **Save configuration**.
+
+Then run the flow across the tabs: **Snapshot** (pick the assets to promote) ->
+**Variables** (or resolve locally) -> **Deploy** (validate, then import).
+
+Setup is fully UI-driven; it writes `.env` (host + the one credential + settings) and
+`variables/orgs.json` (roles + bindings). Both are git-ignored and never committed.
+
+## How each org's values are applied
+
+- **ThoughtSpot Variables** (managed in the Primary org by an admin, scoped per org). The
+  platform resolves the tokens. Requires the Variables feature enabled on the cluster.
+- **Resolved at deploy time** (when Variables are not enabled): the tool substitutes each
+  target org's values into the release as it deploys. Same result; the only difference is
+  where the substitution happens. Toggle this with **Resolve variables locally** in Setup.
+
+## Command line (optional)
+
+The same three steps are available as scripts:
+
+```bash
+python scripts/snapshot.py    --source-org <source org id> --tag <tag>   # or --from-seed
+python scripts/setup_vars.py                                             # create + assign variables
+python scripts/deploy.py      --target <org key> --validate-only         # validate first
+python scripts/deploy.py      --target <org key>                         # then import
+```
+
+## Prerequisites
+
+- An **admin trusted-auth secret** for the Primary org (a bare bearer token is org-bound
+  and only reaches one org).
+- The **connection** in each target org already exists; the tool points content at it by
+  name and does not create warehouses or connections.
+- The **tables** referenced by the content are present in each target org's database and
+  schema.
+- For server-side variable resolution, the **Variables feature** must be enabled on the
+  cluster; otherwise use **Resolve variables locally**.
 
 ## Layout
+
 ```
+app.py                     Streamlit UI (Setup, Snapshot, Variables, Deploy, Repo state)
 config.py                  variable names + parameterization rules
 services/
   param_transform.py       parameterize TML (db/schema -> ${...}, keep obj_id, strip guid)
-  variables.py             Variable API helpers (create, per-org values, search)
-  pipeline.py              the three verbs
+  variables.py             Variable API helpers
+  pipeline.py              snapshot / setup_vars / deploy
   ts_client.py             ThoughtSpot REST v2 client
-  git_repo.py              Git layer (release/ + manifest)
-  gh_creds.py              GITHUB_REPO / GITHUB_TOKEN
-scripts/                   snapshot.py, setup_vars.py, deploy.py
-seed/                      sample Orders content
-variables/targets.example.json  per-target template (name, org_id, connection, values)
+  git_repo.py              release store (local folder or GitHub repo + PR)
+  ui_setup.py              UI-driven config (writes .env + variables/orgs.json)
+  gh_creds.py              GitHub repo / token
+scripts/                   snapshot.py, setup_vars.py, deploy.py, git_bootstrap.py
+seed/                      sample content (offline demo)
+variables/targets.example.json   example per-org config
 tests/test_param.py        offline transform test (no org needed)
 ```
 
