@@ -86,7 +86,7 @@ with tabs[0]:
                 "tag": ss.get("tag", ""), "resolve_local": ss.get("resolve_local", True),
                 "git_local_dir": ss.get("git_local_dir", ""),
                 "github_repo": ss.get("github_repo", ""), "github_token": ss.get("github_token", ""),
-                "git_branch": ss.get("git_branch", "")}
+                "git_branch": ss.get("git_branch", ""), "git_base_branch": ss.get("git_base_branch", "")}
 
     if st.button("Test connection & load orgs", type="primary"):
         try:
@@ -109,15 +109,18 @@ with tabs[0]:
         if gitmode == "Local folder":
             ss["git_local_dir"] = st.text_input("Local folder path (any folder, e.g. inside a git clone - no GitHub token needed)",
                                                 value=ss.get("git_local_dir", "") or os.environ.get("GIT_LOCAL_DIR", ""))
-            ss["github_repo"] = ss["github_token"] = ss["git_branch"] = ""
+            ss["github_repo"] = ss["github_token"] = ss["git_branch"] = ss["git_base_branch"] = ""
         else:
             ss["github_repo"] = st.text_input("GitHub repo (owner/name) - the RELEASE repo, never the source repo",
                                               value=ss.get("github_repo", "") or os.environ.get("GITHUB_REPO", ""))
-            ss["github_token"] = st.text_input("GitHub token (repo scope)",
+            ss["github_token"] = st.text_input("GitHub token (needs: create branch + open PR - `repo` scope, or fine-grained Contents+Pull requests write)",
                                                value=ss.get("github_token", "") or os.environ.get("GITHUB_TOKEN", ""), type="password")
+            ss["git_base_branch"] = st.text_input(
+                "Base branch - the release branch is cut FROM this and the PR opens INTO it (default main; set to e.g. develop)",
+                value=ss.get("git_base_branch", "") or os.environ.get("GIT_BASE_BRANCH", "main"))
             ss["git_branch"] = st.text_input(
-                "Release branch - commits here and opens a PR into main (use when main is protected). "
-                "Blank = commit straight to main.",
+                "Release branch - commits here and opens a PR into the base branch (use when the base is protected). "
+                "Blank = commit straight to the base branch.",
                 value=ss.get("git_branch", "") or os.environ.get("GIT_BRANCH", "ts-release"))
             ss["git_local_dir"] = ""
 

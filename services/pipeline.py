@@ -89,13 +89,15 @@ def git():
     local = os.environ.get("GIT_LOCAL_DIR")
     if local:
         return LocalRepo(local)
-    return AreaGitRepo(github_token(), github_repo())
+    base = os.environ.get("GIT_BASE_BRANCH", "main").strip() or "main"
+    return AreaGitRepo(github_token(), github_repo(), main_branch=base)
 
 
 def _branch():
-    """Release branch for the GitHub backend: snapshot commits here and opens a PR into
-    main - works with a protected main (which rejects direct pushes). None -> commit
-    straight to main, or local-folder mode (GIT_LOCAL_DIR), where branches don't apply."""
+    """Release branch for the GitHub backend: snapshot commits here and opens a PR into the
+    base branch (GIT_BASE_BRANCH, default main) - works with a protected base (which rejects
+    direct pushes). None -> commit straight to the base branch, or local-folder mode
+    (GIT_LOCAL_DIR), where branches don't apply."""
     if os.environ.get("GIT_LOCAL_DIR"):
         return None
     return os.environ.get("GIT_BRANCH") or None
@@ -145,7 +147,7 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None) -> dic
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
     # branch=None commits straight to main (unprotected repos / local mode), as before.
     sha = g.commit_area(RELEASE, files, message="snapshot parameterized release",
-                        branch=branch, reset_from=("main" if branch else None))
+                        branch=branch, reset_from=(g.main if branch else None))
     g.put_file(_MANIFEST, json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
     # prune stale files left by a previous (different) snapshot, so a release fully replaces
@@ -155,7 +157,7 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None) -> dic
     if branch:                                  # open (or reuse) a PR into main for review/merge
         try:
             pr_url = g.open_pr(branch, "ThoughtSpot inter-org release",
-                               "Parameterized `release/` snapshot. Review and merge to record it on `main`.")
+                               f"Parameterized `release/` snapshot. Review and merge to record it on `{g.main}`.")
         except Exception as e:
             warns.append(f"committed to '{branch}', but no PR opened: {str(e)[:140]}")
     return {"files": list(files), "variables": sorted(used), "warnings": warns,

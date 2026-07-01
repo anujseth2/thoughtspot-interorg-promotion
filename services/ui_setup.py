@@ -23,7 +23,7 @@ TARGETS_PATH = ROOT / "variables" / "targets.json"   # legacy, migrated on first
 ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_SECRET_KEY",
             "TS_CA_BUNDLE", "TS_VERIFY_SSL",
             "TS_ORG_PRIMARY", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
-            "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH"]
+            "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH", "GIT_BASE_BRANCH"]
 
 
 def _verify_from_cfg(cfg: dict):
@@ -124,6 +124,7 @@ def env_values(cfg: dict) -> dict:
         "GITHUB_REPO": cfg.get("github_repo", ""),
         "GITHUB_TOKEN": cfg.get("github_token", ""),
         "GIT_BRANCH": cfg.get("git_branch", ""),
+        "GIT_BASE_BRANCH": cfg.get("git_base_branch", ""),
     }
 
 
