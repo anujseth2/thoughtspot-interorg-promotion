@@ -68,15 +68,19 @@ class AreaGitRepo:
         base = reset_from or self.main
 
         try:
-            parent = self._repo.get_branch(branch).commit
-            if reset_from:
-                base_sha = self._repo.get_branch(base).commit.sha
-                self._repo.get_git_ref(f"heads/{branch}").edit(base_sha, force=True)
-                parent = self._repo.get_branch(branch).commit
+            cur = self._repo.get_branch(branch)
+            branch_exists = True
         except GithubException:
-            base_sha = self._repo.get_branch(base).commit.sha
-            self._repo.create_git_ref(f"refs/heads/{branch}", base_sha)
-            parent = self._repo.get_branch(branch).commit
+            branch_exists = False
+
+        # Parent for the new commit. With reset_from, parent is the BASE tip, so the branch
+        # is set to "base + these files" in a SINGLE ref update - it never passes through a
+        # "0 commits ahead of base" state, which would make GitHub auto-close an open PR.
+        # Without reset_from we append to the branch (or seed it from base if it's new).
+        if reset_from or not branch_exists:
+            parent = self._repo.get_branch(base).commit
+        else:
+            parent = cur.commit
 
         blobs = []
         for rel, content in files.items():
@@ -88,19 +92,25 @@ class AreaGitRepo:
         base_tree = self._repo.get_git_tree(parent.commit.tree.sha)
         new_tree = self._repo.create_git_tree(blobs, base_tree)
         new_commit = self._repo.create_git_commit(message, new_tree, [parent.commit])
-        self._repo.get_git_ref(f"heads/{branch}").edit(new_commit.sha)
+        if branch_exists:
+            # force only when we reset lineage from base; a plain append is fast-forward
+            self._repo.get_git_ref(f"heads/{branch}").edit(new_commit.sha, force=bool(reset_from))
+        else:
+            self._repo.create_git_ref(f"refs/heads/{branch}", new_commit.sha)
         return new_commit.sha
 
     # ── PR (the promotion review gate) ──────────────────────────────────────────
     def open_pr(self, head_branch: str, title: str, body: str) -> str:
-        for pr in self._repo.get_pulls(state="open", base=self.main, head=head_branch):
-            return pr.html_url  # reuse an already-open PR for this branch
+        head = f"{self._repo.owner.login}:{head_branch}"   # GitHub's head filter needs owner:branch
+        for pr in self._repo.get_pulls(state="open", base=self.main, head=head):
+            return pr.html_url  # reuse the already-open PR for this branch
         pr = self._repo.create_pull(title=title, body=body,
                                     head=head_branch, base=self.main)
         return pr.html_url
 
     def merge_pr(self, head_branch: str) -> bool:
-        for pr in self._repo.get_pulls(state="open", base=self.main, head=head_branch):
+        head = f"{self._repo.owner.login}:{head_branch}"
+        for pr in self._repo.get_pulls(state="open", base=self.main, head=head):
             pr.merge(merge_method="squash", commit_title=pr.title,
                      commit_message="Merged via area-promotion tool.")
             return True
