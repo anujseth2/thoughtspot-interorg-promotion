@@ -21,8 +21,14 @@ from github import Github, GithubException, InputGitTreeElement
 
 
 class AreaGitRepo:
-    def __init__(self, token: str, repo_name: str, main_branch: str = "main"):
-        self._gh = Github(token)
+    def __init__(self, token: str, repo_name: str, main_branch: str = "main",
+                 verify=True, base_url: str = ""):
+        # verify: True | False | CA-bundle path (corporate TLS-inspection proxy).
+        # base_url: blank for github.com; GitHub Enterprise Server = https://<host>/api/v3.
+        kwargs = {"verify": verify}
+        if base_url:
+            kwargs["base_url"] = base_url.rstrip("/")
+        self._gh = Github(token, **kwargs)
         self._repo = self._gh.get_repo(repo_name)
         self.main = main_branch
 

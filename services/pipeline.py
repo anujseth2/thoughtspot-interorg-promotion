@@ -90,7 +90,8 @@ def git():
     if local:
         return LocalRepo(local)
     base = os.environ.get("GIT_BASE_BRANCH", "main").strip() or "main"
-    return AreaGitRepo(github_token(), github_repo(), main_branch=base)
+    return AreaGitRepo(github_token(), github_repo(), main_branch=base,
+                       verify=_verify(), base_url=os.environ.get("GITHUB_API_URL", "").strip())
 
 
 def _branch():

@@ -86,7 +86,8 @@ with tabs[0]:
                 "tag": ss.get("tag", ""), "resolve_local": ss.get("resolve_local", True),
                 "git_local_dir": ss.get("git_local_dir", ""),
                 "github_repo": ss.get("github_repo", ""), "github_token": ss.get("github_token", ""),
-                "git_branch": ss.get("git_branch", ""), "git_base_branch": ss.get("git_base_branch", "")}
+                "git_branch": ss.get("git_branch", ""), "git_base_branch": ss.get("git_base_branch", ""),
+                "github_api_url": ss.get("github_api_url", ""), "git_base_path": ss.get("git_base_path", "")}
 
     if st.button("Test connection & load orgs", type="primary"):
         try:
@@ -109,12 +110,15 @@ with tabs[0]:
         if gitmode == "Local folder":
             ss["git_local_dir"] = st.text_input("Local folder path (any folder, e.g. inside a git clone - no GitHub token needed)",
                                                 value=ss.get("git_local_dir", "") or os.environ.get("GIT_LOCAL_DIR", ""))
-            ss["github_repo"] = ss["github_token"] = ss["git_branch"] = ss["git_base_branch"] = ""
+            ss["github_repo"] = ss["github_token"] = ss["git_branch"] = ss["git_base_branch"] = ss["github_api_url"] = ""
         else:
             ss["github_repo"] = st.text_input("GitHub repo (owner/name) - the RELEASE repo, never the source repo",
                                               value=ss.get("github_repo", "") or os.environ.get("GITHUB_REPO", ""))
             ss["github_token"] = st.text_input("GitHub token (needs: create branch + open PR - `repo` scope, or fine-grained Contents+Pull requests write)",
                                                value=ss.get("github_token", "") or os.environ.get("GITHUB_TOKEN", ""), type="password")
+            ss["github_api_url"] = st.text_input(
+                "API base URL (blank = github.com; GitHub Enterprise Server: https://<host>/api/v3)",
+                value=ss.get("github_api_url", "") or os.environ.get("GITHUB_API_URL", ""))
             ss["git_base_branch"] = st.text_input(
                 "Base branch - the release branch is cut FROM this and the PR opens INTO it (default main; set to e.g. develop)",
                 value=ss.get("git_base_branch", "") or os.environ.get("GIT_BASE_BRANCH", "main"))
@@ -123,6 +127,10 @@ with tabs[0]:
                 "Blank = commit straight to the base branch.",
                 value=ss.get("git_branch", "") or os.environ.get("GIT_BRANCH", "ts-release"))
             ss["git_local_dir"] = ""
+
+        ss["git_base_path"] = st.text_input(
+            "Subfolder (optional) - nest the release under this path in the repo/folder (e.g. thoughtspot). Blank = root.",
+            value=ss.get("git_base_path", "") or os.environ.get("GIT_BASE_PATH", ""))
 
         st.markdown("**Options**")
         ss["resolve_local"] = st.checkbox(
