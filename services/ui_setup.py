@@ -44,12 +44,30 @@ def make_client(cfg: dict, org_id="") -> TSClient:
 
 
 def list_orgs(cfg: dict):
-    """[(id, name)] for every org. Doubles as the auth test - raises on bad creds.
-    Connects to the primary org with the one credential."""
+    """[(id, name)] for every org. Connects to the primary org with the one credential."""
     c = make_client(cfg, cfg.get("primary_org", "0"))
     data = c._post("/api/rest/2.0/orgs/search", {})
     orgs = data if isinstance(data, list) else data.get("orgs", [])
     return [(str(o.get("id")), o.get("name")) for o in orgs]
+
+
+def connect(cfg: dict):
+    """Validate the credential and best-effort list the orgs. Returns (orgs, note).
+
+    The credential is validated by the token mint in make_client (raises if it's truly bad).
+    orgs/search requires ORG_ADMINISTRATION, so a non-admin gets a 403 there even though they
+    can still operate in the orgs they belong to - in that case we return ([], note) so the UI
+    can fall back to manual org-ID entry. Promotion does NOT need org-admin."""
+    c = make_client(cfg, cfg.get("primary_org", "0"))   # token mint = credential check
+    try:
+        data = c._post("/api/rest/2.0/orgs/search", {})
+        orgs = data if isinstance(data, list) else data.get("orgs", [])
+        return [(str(o.get("id")), o.get("name")) for o in orgs], ""
+    except Exception as e:
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code == 401:
+            raise                                        # genuinely bad credential
+        return [], f"HTTP {code or '?'} on orgs/search (that endpoint needs org-admin)"
 
 
 def list_connections(cfg: dict, org_id):

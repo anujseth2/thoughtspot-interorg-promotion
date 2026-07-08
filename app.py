@@ -91,18 +91,38 @@ with tabs[0]:
 
     if st.button("Test connection & load orgs", type="primary"):
         try:
-            ss["orgs"] = ui_setup.list_orgs(_cfg())
+            orgs, note = ui_setup.connect(_cfg())
+            ss["connected"] = True
+            ss["orgs"] = orgs
             ss.setdefault("orgs_cfg", ui_setup.load_orgs_config())
-            st.success(f"Connected. Loaded {len(ss['orgs'])} orgs. Step 2 is unlocked below.")
+            if note:
+                st.warning(f"Connected, but {note}. Add the org IDs manually below - promotion "
+                           "only needs membership + data rights in the orgs you use, not org-admin.")
+            else:
+                st.success(f"Connected. Loaded {len(orgs)} orgs. Step 2 is unlocked below.")
         except Exception as e:
-            ss.pop("orgs", None)
+            ss.pop("connected", None); ss.pop("orgs", None)
             st.error(f"Connection failed - {type(e).__name__}: {str(e)[:300]}")
 
-    if ss.get("orgs"):
+    if ss.get("connected"):
+        ss.setdefault("orgs", [])
+        ss.setdefault("orgs_cfg", {})
+
+        with st.expander("Orgs  ·  add by ID if the list is empty (non-admins can't auto-list orgs)",
+                         expanded=not ss["orgs"]):
+            m1, m2, m3 = st.columns([2, 3, 1])
+            _mid = m1.text_input("Org ID", key="man_org_id")
+            _mname = m2.text_input("Name (optional)", key="man_org_name")
+            if m3.button("Add", key="man_org_add") and _mid.strip():
+                if _mid.strip() not in [i for i, _ in ss["orgs"]]:
+                    ss["orgs"].append((_mid.strip(), _mname.strip() or _mid.strip()))
+                    st.rerun()
+            if ss["orgs"]:
+                st.caption("Orgs available: " + ", ".join(f"{n} ({i})" for i, n in ss["orgs"]))
+
         orgs = ss["orgs"]
         id2name = {i: n for i, n in orgs}
         ids = [i for i, _ in orgs]
-        ss.setdefault("orgs_cfg", {})
 
         # ── Git store ──
         st.markdown("**Git store**")
