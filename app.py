@@ -346,10 +346,26 @@ with tabs[2]:
         st.caption("Skip this step if you resolve variables locally (Setup → Resolve variables locally).")
         if st.button("Create + assign", type="primary"):
             values_by_org = {c["org_id"]: c["values"] for c in targets.values() if c.get("values")}
-            with st.spinner("Setting up variables…"):
-                r = pipeline.setup_vars(values_by_org)
-            st.success(f"created {r['created'] or '(all existed)'}; {len(r['assigned'])} value(s) assigned")
-            st.table(r["assigned"])
+            try:
+                with st.spinner("Setting up variables…"):
+                    r = pipeline.setup_vars(values_by_org)
+                st.success(f"created {r['created'] or '(all existed)'}; {len(r['assigned'])} value(s) assigned")
+                st.table(r["assigned"])
+            except Exception as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                body = (getattr(getattr(e, "response", None), "text", "") or "") + " " + str(e)
+                if code in (401, 403):
+                    reason = "Creating variables needs **admin on the Primary org** (this step is admin-gated)."
+                elif "Variable Store" in body or "host port" in body:
+                    reason = "The **Variables feature isn't enabled** on this cluster (ThoughtSpot Support has to switch it on)."
+                else:
+                    reason = None
+                if reason:
+                    st.error(f"{reason}  You can skip this step entirely: in the **Setup** tab tick "
+                             "**Resolve variables locally**, then run **Deploy** - the tool bakes each "
+                             "org's db/schema in at deploy time instead of using ThoughtSpot Variables.")
+                else:
+                    st.error(f"Variables step failed - {type(e).__name__}: {str(e)[:300]}")
 
 # ── 3 · deploy ─────────────────────────────────────────────────────────────────────
 with tabs[3]:
