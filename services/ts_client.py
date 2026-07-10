@@ -96,6 +96,14 @@ class TSClient:
             return {}  # tags/assign, share, update-obj-id return 204 No Content
         return resp.json()
 
+    def _get(self, path: str) -> dict:
+        resp = self._session.get(f"{self.host}{path}", timeout=180)
+        if resp.status_code == 401 and self._username and (self._password or self._secret):
+            self._reauth()
+            resp = self._session.get(f"{self.host}{path}", timeout=180)
+        resp.raise_for_status()
+        return resp.json() if resp.text.strip() else {}
+
     # ── Metadata search ───────────────────────────────────────────────────────
 
     def search_metadata(self, prefix: str) -> List[Dict]:

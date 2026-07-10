@@ -59,15 +59,21 @@ def connect(cfg: dict):
     can still operate in the orgs they belong to - in that case we return ([], note) so the UI
     can fall back to manual org-ID entry. Promotion does NOT need org-admin."""
     c = make_client(cfg, cfg.get("primary_org", "0"))   # token mint = credential check
+    # 1) admin path: orgs/search lists every org on the cluster
     try:
         data = c._post("/api/rest/2.0/orgs/search", {})
         orgs = data if isinstance(data, list) else data.get("orgs", [])
-        return [(str(o.get("id")), o.get("name")) for o in orgs], ""
+        if orgs:
+            return [(str(o.get("id")), o.get("name")) for o in orgs], ""
     except Exception as e:
-        code = getattr(getattr(e, "response", None), "status_code", None)
-        if code == 401:
+        if getattr(getattr(e, "response", None), "status_code", None) == 401:
             raise                                        # genuinely bad credential
-        return [], f"HTTP {code or '?'} on orgs/search (that endpoint needs org-admin)"
+    # 2) non-admin fallback: auth/session/user (any user can call it) returns the orgs the
+    #    user BELONGS to, with id + name - so a non-admin still gets their target org by name.
+    me = c._get("/api/rest/2.0/auth/session/user")
+    myorgs = me.get("orgs") or ([me["current_org"]] if me.get("current_org") else [])
+    orgs = [(str(o.get("id")), o.get("name")) for o in myorgs if o.get("id") is not None]
+    return orgs, ("" if orgs else "couldn't list your orgs - add the org IDs manually below")
 
 
 def list_connections(cfg: dict, org_id):
