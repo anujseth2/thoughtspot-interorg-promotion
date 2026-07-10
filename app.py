@@ -108,17 +108,25 @@ with tabs[0]:
         ss.setdefault("orgs", [])
         ss.setdefault("orgs_cfg", {})
 
-        with st.expander("Orgs  ·  add by ID if the list is empty (non-admins can't auto-list orgs)",
-                         expanded=not ss["orgs"]):
-            m1, m2, m3 = st.columns([2, 3, 1])
-            _mid = m1.text_input("Org ID", key="man_org_id")
-            _mname = m2.text_input("Name (optional)", key="man_org_name")
-            if m3.button("Add", key="man_org_add") and _mid.strip():
+        st.markdown("**Orgs in play**")
+        st.caption("Every org you'll use - the source and each target. Org-admins get these "
+                   "auto-loaded on connect; otherwise add them by ID (Admin > Orgs, or ask your admin).")
+        with st.form("add_org", clear_on_submit=True):
+            f1, f2 = st.columns([2, 3])
+            _mid = f1.text_input("Org ID")
+            _mname = f2.text_input("Name (optional)")
+            if st.form_submit_button("Add org") and _mid.strip():
                 if _mid.strip() not in [i for i, _ in ss["orgs"]]:
                     ss["orgs"].append((_mid.strip(), _mname.strip() or _mid.strip()))
+        if ss["orgs"]:
+            for _i, _n in list(ss["orgs"]):
+                rc1, rc2 = st.columns([8, 1])
+                rc1.write(f"• {_n}  (`{_i}`)")
+                if rc2.button("Remove", key=f"rm_org_{_i}"):
+                    ss["orgs"] = [(x, y) for x, y in ss["orgs"] if x != _i]
                     st.rerun()
-            if ss["orgs"]:
-                st.caption("Orgs available: " + ", ".join(f"{n} ({i})" for i, n in ss["orgs"]))
+        else:
+            st.info("No orgs yet - add the source and target org IDs above.")
 
         orgs = ss["orgs"]
         id2name = {i: n for i, n in orgs}
