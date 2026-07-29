@@ -309,6 +309,48 @@ class TSClient:
                             "type": it.get("metadata_type", "")})
         return out
 
+    # ── Collections (beta; 26.4.0.cl+, off by default) ──────────────────────────
+    def list_collections(self) -> List[Dict]:
+        """[{id, name, description}] of collections in this org, for the picker."""
+        data = self._post("/api/rest/2.0/collections/search",
+                          {"record_size": -1, "include_metadata": False})
+        cols = data.get("collections", []) if isinstance(data, dict) else (data or [])
+        return [{"id": c.get("id", ""), "name": c.get("name", ""),
+                 "description": c.get("description", "")} for c in cols]
+
+    def resolve_collection(self, collection_id: str) -> List[Dict]:
+        """Flatten a collection to its promotable members, recursing into nested
+        sub-collections. Returns deduped [{id, name, type}] for LIVEBOARD / ANSWER /
+        LOGICAL_TABLE (collections hold no CONNECTIONs; export pulls those in).
+        Cycle-safe via a visited set."""
+        PROMOTABLE = {"LIVEBOARD", "ANSWER", "LOGICAL_TABLE"}
+        out: Dict[str, Dict] = {}
+        seen_cols: set = set()
+
+        def walk(cid: str):
+            if not cid or cid in seen_cols:
+                return
+            seen_cols.add(cid)
+            data = self._post("/api/rest/2.0/collections/search",
+                              {"collection_identifiers": [cid], "include_metadata": True,
+                               "record_size": -1})
+            cols = data.get("collections", []) if isinstance(data, dict) else (data or [])
+            for col in cols:
+                for m in (col.get("metadata") or []):
+                    mtype = m.get("type")
+                    for ident in (m.get("identifiers") or []):
+                        guid = ident.get("identifier")
+                        if not guid:
+                            continue
+                        if mtype == "COLLECTION":
+                            walk(guid)                       # recurse into sub-collection
+                        elif mtype in PROMOTABLE and guid not in out:
+                            out[guid] = {"id": guid, "name": ident.get("name", ""),
+                                         "type": mtype}
+
+        walk(collection_id)
+        return list(out.values())
+
     # ── Export object + its dependency chain ────────────────────────────────────
     def export_associated_edocs(self, object_ids: List[str]) -> List[str]:
         """Export TML for the given objects AND their dependencies (model, tables).

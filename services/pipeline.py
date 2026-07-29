@@ -119,7 +119,22 @@ def list_source_assets(source_org=None, types=None):
     return ts.list_objects(types or ["LIVEBOARD", "ANSWER", "LOGICAL_TABLE"])
 
 
-def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None) -> dict:
+def list_source_collections(source_org=None):
+    """[{id, name, description}] of collections in the source org, for the snapshot
+    picker. Requires the Collections beta (26.4.0.cl+, off by default)."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    return ts.list_collections()
+
+
+def resolve_collection(collection_id, source_org=None):
+    """[{id, name, type}] of a collection's promotable members in the source org,
+    recursing into sub-collections. For the snapshot preview."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    return ts.resolve_collection(collection_id)
+
+
+def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
+             collection=None) -> dict:
     g = git()
     if from_seed:
         docs = [load_tml(p.read_text()) for p in sorted((ROOT / "seed").glob("*.tml"))]
@@ -128,6 +143,12 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None) -> dic
         types = ["LOGICAL_TABLE", "LIVEBOARD", "ANSWER"]
         if object_ids:                             # explicit asset selection (deps pulled in)
             ids = list(object_ids)
+        elif collection:                           # scope the release to a collection (recursed)
+            found = ts.resolve_collection(collection)
+            if not found:
+                raise RuntimeError(f"collection '{collection}' has no promotable members "
+                                   "in the source org (empty, or Collections beta not enabled)")
+            ids = [f["id"] for f in found]
         elif tag:                                  # scope the release to a tag
             found = ts.search_by_tag(tag, types)
             if not found:
