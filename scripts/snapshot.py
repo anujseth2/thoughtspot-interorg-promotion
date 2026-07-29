@@ -3,6 +3,7 @@
 Usage:
   python scripts/snapshot.py --from-seed                 # demo: parameterize the seed
   python scripts/snapshot.py --source-org 0 --tag release  # export tagged objects from an org
+  python scripts/snapshot.py --source-org 0 --collection <guid>  # export a collection (sub-collections flattened)
 """
 import argparse
 import sys
@@ -19,9 +20,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--from-seed", action="store_true")
 ap.add_argument("--source-org")
 ap.add_argument("--tag", help="filter source objects to this tag; omit to snapshot ALL assets")
+ap.add_argument("--collection", help="GUID of a collection to snapshot; sub-collections are flattened")
 a = ap.parse_args()
 
-r = pipeline.snapshot(source_org=a.source_org, tag=a.tag, from_seed=a.from_seed)
+r = pipeline.snapshot(source_org=a.source_org, tag=a.tag, from_seed=a.from_seed,
+                      collection=a.collection)
 print(f"committed {r['sha'][:8]} -> release/ ({len(r['files'])} file(s))")
 for f in r["files"]:
     print(f"   release/{f}")

@@ -249,7 +249,7 @@ with tabs[1]:
              "(db/schema → `${...}`, keep obj_id, strip guids), and write `release/`.")
     ss = st.session_state
     from_seed = st.checkbox("Use bundled seed (demo)", value=False)
-    src, tag, object_ids, scope = "", None, None, None
+    src, tag, object_ids, scope, collection = "", None, None, None, None
     if not from_seed:
         orgs = ss.get("orgs")
         if orgs:
@@ -264,10 +264,11 @@ with tabs[1]:
             src = st.text_input("Source org id", value=os.environ.get("TS_ORG_SOURCE", ""))
             st.caption("Connect in the **Setup** tab to pick the source org by name.")
         scope = st.radio(
-            "What to promote", ["Pick assets", "By tag", "All objects in the org"],
+            "What to promote", ["Pick assets", "By tag", "By collection", "All objects in the org"],
             horizontal=True,
             help="Pick assets: choose specific objects; their dependencies (model, tables) "
-                 "are pulled in automatically, so you only pick the top-level Liveboard/Answer/Model.")
+                 "are pulled in automatically, so you only pick the top-level Liveboard/Answer/Model. "
+                 "By collection: promote every asset in a collection, recursing into sub-collections.")
         if scope == "Pick assets":
             if st.button("List assets in the source org"):
                 try:
@@ -322,14 +323,43 @@ with tabs[1]:
                 st.info("Click **List assets in the source org** to choose objects.")
         elif scope == "By tag":
             tag = st.text_input("Tag", value=os.environ.get("TS_RELEASE_TAG", ""))
+        elif scope == "By collection":
+            if st.button("List collections in the source org"):
+                try:
+                    ss["snap_collections"] = pipeline.list_source_collections(src or None)
+                except Exception as e:
+                    ss.pop("snap_collections", None)
+                    st.error(f"Couldn't list collections - {type(e).__name__}: {str(e)[:200]}")
+            cols = ss.get("snap_collections", [])
+            if cols:
+                c2n = {c["id"]: c["name"] for c in cols}
+                collection = st.selectbox(
+                    "Collection", [c["id"] for c in cols],
+                    format_func=lambda i: f"{c2n.get(i, i)}  ({i[:8]})")
+                if st.button("Preview members"):
+                    try:
+                        ss["coll_preview"] = pipeline.resolve_collection(collection, src or None)
+                    except Exception as e:
+                        st.error(f"Couldn't resolve - {type(e).__name__}: {str(e)[:200]}")
+                prev = ss.get("coll_preview")
+                if prev is not None:
+                    _ty = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "LOGICAL_TABLE": "Table/Model"}
+                    st.caption(f"Resolves to **{len(prev)}** asset(s) (sub-collections flattened):")
+                    st.table([{"Name": m.get("name", ""), "Type": _ty.get(m.get("type"), m.get("type"))}
+                              for m in prev])
+            else:
+                st.info("Click **List collections in the source org** to choose one.")
 
     if st.button("Snapshot", type="primary"):
         if scope == "Pick assets" and not object_ids:
             st.warning("Add at least one asset to the set (or switch to By tag / All objects).")
+        elif scope == "By collection" and not collection:
+            st.warning("Pick a collection (or switch to another scope).")
         else:
             with st.spinner("Parameterizing + writing release…"):
                 r = pipeline.snapshot(source_org=src or None, tag=tag or None,
-                                      from_seed=from_seed, object_ids=object_ids or None)
+                                      from_seed=from_seed, object_ids=object_ids or None,
+                                      collection=collection or None)
             st.success(f"Wrote {len(r['files'])} file(s) to `release/` @ `{r['sha'][:8]}`")
             st.write("variables referenced:", r["variables"])
             if r.get("source_bindings"):
