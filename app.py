@@ -356,10 +356,16 @@ with tabs[1]:
         elif scope == "By collection" and not collection:
             st.warning("Pick a collection (or switch to another scope).")
         else:
-            with st.spinner("Parameterizing + writing release…"):
-                r = pipeline.snapshot(source_org=src or None, tag=tag or None,
-                                      from_seed=from_seed, object_ids=object_ids or None,
-                                      collection=collection or None)
+            try:
+                with st.spinner("Parameterizing + writing release…"):
+                    r = pipeline.snapshot(source_org=src or None, tag=tag or None,
+                                          from_seed=from_seed, object_ids=object_ids or None,
+                                          collection=collection or None)
+            except Exception as e:
+                # An incomplete export (e.g. a dependency the user can't access) aborts here
+                # instead of writing a thin release that looks complete. Show it, don't hide it.
+                st.error(f"Snapshot failed - nothing was written.\n\n{e}")
+                st.stop()
             st.success(f"Wrote {len(r['files'])} file(s) to `release/` @ `{r['sha'][:8]}`")
             st.write("variables referenced:", r["variables"])
             if r.get("source_bindings"):

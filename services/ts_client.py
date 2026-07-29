@@ -352,17 +352,38 @@ class TSClient:
         return list(out.values())
 
     # ── Export object + its dependency chain ────────────────────────────────────
-    def export_associated_edocs(self, object_ids: List[str]) -> List[str]:
-        """Export TML for the given objects AND their dependencies (model, tables).
-        Returns a list of edoc strings. NOTE: confirm the response shape against a
-        real export from the sandbox org, then tighten the parsing below."""
+    def export_associated(self, object_ids: List[str]):
+        """Export the given objects AND their dependencies (model, tables). Returns
+        (edocs, failures):
+          edocs    - list of edoc strings for objects that exported cleanly
+          failures - [{name, type, status, error}] for any object TS returned in the
+                     response WITHOUT a usable edoc (e.g. a dependency the connecting user
+                     can't access -> status ERROR/FORBIDDEN).
+
+        The API returns HTTP 200 even when individual associated objects fail, listing each
+        failure as an item with a status but no edoc. Callers MUST inspect `failures`:
+        dropping a forbidden dependency silently is how an incomplete release ends up
+        masquerading as a complete one (a whole liveboard promoted without its model/tables)."""
         data = self._post("/api/rest/2.0/metadata/tml/export", {
             "metadata": [{"identifier": oid} for oid in object_ids],
             "export_associated": True,
             "export_options": {"include_obj_id": True, "include_obj_id_ref": True},
         })
         items = data if isinstance(data, list) else data.get("object", data.get("metadata", []))
-        return [it.get("edoc", "") for it in items if it.get("edoc")]
+        edocs: List[str] = []
+        failures: List[Dict] = []
+        for it in items:
+            info = it.get("info") or {}
+            if it.get("edoc"):
+                edocs.append(it["edoc"])
+            else:
+                st = info.get("status") or {}
+                msg = (st.get("error_message") or "").strip().splitlines()
+                failures.append({"name": info.get("name") or "?",
+                                 "type": info.get("type") or "?",
+                                 "status": st.get("status_code") or "UNKNOWN",
+                                 "error": msg[0] if msg else ""})
+        return edocs, failures
 
     # ── Connection schema introspection (live, from the CDW) ────────────────────
     def connection_columns(self, conn_identifier: str, database: str,

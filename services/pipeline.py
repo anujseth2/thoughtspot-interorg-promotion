@@ -159,7 +159,20 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             if not found:
                 raise RuntimeError("no objects found in the source org")
             ids = [f["id"] for f in found]
-        edocs = ts.export_associated_edocs(ids)
+        edocs, failures = ts.export_associated(ids)
+        if failures:
+            # Do NOT silently drop objects TS couldn't export - a missing dependency (e.g. a
+            # model/table the connecting user can't access) would otherwise produce a thin
+            # release that looks complete. Abort loudly so it's fixed at the source.
+            lines = "\n  - ".join(f"{f['type']} '{f['name']}' -> {f['status']}: {f['error']}"
+                                  for f in failures)
+            raise RuntimeError(
+                f"Export incomplete: {len(failures)} object(s) could not be exported and would be "
+                f"MISSING from the release. This usually means the connecting user lacks access to a "
+                f"dependency (model/table). Grant access in the source org and re-run.\n  - {lines}")
+        if not edocs:
+            raise RuntimeError("Export returned no objects - nothing to snapshot "
+                               "(check the selection and the connecting user's access).")
         docs = [load_tml(e) for e in edocs]
 
     bindings = source_bindings(docs)               # real db/schema, read before parameterizing
