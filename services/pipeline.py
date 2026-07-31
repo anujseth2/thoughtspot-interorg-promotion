@@ -43,13 +43,18 @@ _ORDER = {"connection": 0, "table": 1, "view": 1, "sql_view": 1,
           "model": 2, "worksheet": 2, "answer": 3, "liveboard": 4}
 
 
-def _auth():
-    """The single credential, from the environment. A trusted-auth secret (+ admin user)
-    or an admin username/password reaches every org, because the client mints a token per
-    org_id at connect time. (A bare bearer token is org-bound, so it only covers one org.)"""
+def _auth(role: str = "source"):
+    """The credential, from the environment. A trusted-auth secret (+ admin user) or an admin
+    username/password reaches every org (the client mints a token per org_id at connect time),
+    so one credential covers source AND target. A bare bearer token is org-bound, so for the
+    bearer case you provide TWO: TS_TOKEN (source) and TS_TOKEN_TARGET (target); role='target'
+    swaps in the target token for the deploy side."""
+    token = os.environ.get("TS_TOKEN", "")
+    if role == "target" and os.environ.get("TS_TOKEN_TARGET", "").strip():
+        token = os.environ["TS_TOKEN_TARGET"].strip()      # org-bound target bearer for deploy
     return dict(username=os.environ.get("TS_USER", ""),
                 password=os.environ.get("TS_PASSWORD", ""),
-                token=os.environ.get("TS_TOKEN", ""),
+                token=token,
                 secret_key=os.environ.get("TS_SECRET_KEY", ""))
 
 
@@ -89,8 +94,8 @@ def primary_client() -> TSClient:
     return TSClient(host=os.environ["TS_HOST"], org_id=_primary_org(), verify=_verify(), **_auth())
 
 
-def org_client(org) -> TSClient:
-    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **_auth())
+def org_client(org, role: str = "source") -> TSClient:
+    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **_auth(role))
 
 
 def git():
@@ -255,7 +260,7 @@ def deploy(target: str, validate_only: bool = False) -> dict:
     cfg = _targets().get(target)
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
-    ts = org_client(cfg["org_id"])
+    ts = org_client(cfg["org_id"], role="target")   # uses TS_TOKEN_TARGET when set (bearer case)
     files = {k: v for k, v in git().read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
     if not files:
         raise RuntimeError("release/ is empty in Git — run snapshot first")

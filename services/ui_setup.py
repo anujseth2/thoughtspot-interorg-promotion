@@ -20,7 +20,7 @@ TARGETS_PATH = ROOT / "variables" / "targets.json"   # legacy, migrated on first
 
 # env keys written/read (the cluster host + the DEFAULT credential + non-org settings);
 # per-org credentials live in orgs.json, not here.
-ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_SECRET_KEY",
+ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_TOKEN_TARGET", "TS_SECRET_KEY",
             "TS_CA_BUNDLE", "TS_VERIFY_SSL",
             "TS_ORG_PRIMARY", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
             "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH", "GIT_BASE_BRANCH",
@@ -138,6 +138,7 @@ def env_values(cfg: dict) -> dict:
         "TS_USER": cfg.get("user", ""),
         "TS_PASSWORD": cfg.get("password", ""),
         "TS_TOKEN": cfg.get("token", ""),
+        "TS_TOKEN_TARGET": cfg.get("target_token", ""),
         "TS_SECRET_KEY": cfg.get("secret", ""),
         "TS_CA_BUNDLE": cfg.get("ca_bundle", ""),
         "TS_VERIFY_SSL": "" if cfg.get("verify_ssl", True) else "false",
