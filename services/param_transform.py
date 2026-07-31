@@ -48,6 +48,37 @@ def tml_type(doc: dict):
     return None
 
 
+def _strip_ref_fqns(doc: dict, typ: str) -> None:
+    """Strip cluster/org-specific `fqn` from an object and its cross-object references so the
+    import resolves them by obj_id on the TARGET org (a source fqn does not exist there and, if
+    left in, can win over obj_id resolution and break the import). Names + obj_ids are kept.
+    Ported from the GSK cross-cluster transform; safe no-op when fqn isn't present.
+      table/view/sql_view : the object's own fqn
+      model/worksheet     : each table ref (tables / model_tables)
+      answer              : model refs (tables[])
+      liveboard           : each viz's embedded answer model refs
+    """
+    obj = doc.get(typ, {}) or {}
+    if typ in TABLE_TYPES:
+        obj.pop("fqn", None)
+    elif typ in ("model", "worksheet"):
+        for key in ("tables", "model_tables"):
+            for t in obj.get(key, []) or []:
+                if isinstance(t, dict):
+                    t.pop("fqn", None)
+    elif typ == "answer":
+        for t in obj.get("tables", []) or []:
+            if isinstance(t, dict):
+                t.pop("fqn", None)
+    elif typ == "liveboard":
+        for viz in obj.get("visualizations", []) or []:
+            ans = viz.get("answer") if isinstance(viz, dict) else None
+            if isinstance(ans, dict):
+                for t in ans.get("tables", []) or []:
+                    if isinstance(t, dict):
+                        t.pop("fqn", None)
+
+
 def load_tml(edoc: str) -> dict:
     edoc = edoc or ""
     return json.loads(edoc) if edoc.lstrip().startswith("{") else yaml.safe_load(edoc)
@@ -63,6 +94,7 @@ def parameterize_doc(doc: dict) -> Tuple[dict, Set[str], List[str]]:
 
     _strip_guids(doc)                           # drop cluster-specific guids (incl. embedded
                                                 # viz_guid) so re-import is idempotent; obj_id stays
+    _strip_ref_fqns(doc, typ)                   # drop source-org fqns -> force obj_id resolution
     if not doc.get("obj_id"):
         warns.append("no obj_id -- object is NOT cross-org portable until one is set")
 

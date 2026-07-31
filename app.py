@@ -15,6 +15,8 @@ import pandas as pd
 import streamlit as st
 
 from services import pipeline, ui_setup
+from services.reconcile import reconcile
+from services import nl_instructions, feedback_replace
 
 load_dotenv()
 
@@ -433,23 +435,87 @@ with tabs[3]:
     if not targets:
         st.warning("No targets configured - add them in the Setup tab.")
     else:
+        ss = st.session_state
         tgt = st.selectbox("Target", list(targets.keys()),
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
         only = st.checkbox("Validate only (no import)", value=True)
         if st.button(f"{'Validate' if only else 'Deploy'} → {tgt}", type="primary"):
             with st.spinner("Validating + deploying…"):
-                r = pipeline.deploy(tgt, validate_only=only)
+                ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only)
+            ss["deploy_tgt"] = tgt
+
+        r = ss.get("deploy_result")
+        if r and ss.get("deploy_tgt") == tgt:
             st.write(f"**Target:** `{r['target']}` (org {r['org']})")
             st.write("**Validate:**")
             st.table([{"status": v["status"], "type": v["type"], "name": v["name"],
                        "error": v.get("error") or ""} for v in r["validate"]])
+            if r.get("dropped"):
+                st.info(f"Deployed with {len(r['dropped'])} column-drop(s) applied (warehouse-missing).")
+
+            findings = r.get("findings") or []
+            if findings:
+                st.write("**What went wrong — and how to fix it:**")
+                for f in findings:
+                    msg = f.get("message") or f.get("kind", "error")
+                    fix = f.get("fix")
+                    st.error(msg + (f"\n\n➡ {fix}" if fix else ""))
+                # offer to drop warehouse-missing columns (+ dependents) and re-deploy
+                dropcols = sorted({tok for f in findings if f.get("kind") == "missing_warehouse_column"
+                                   for tok in (f.get("drop") or [])})
+                if dropcols:
+                    st.warning(f"{len(dropcols)} column(s) missing in the target warehouse: "
+                               + ", ".join(dropcols))
+                    if st.button("Drop those columns + dependent vizzes and re-deploy"):
+                        with st.spinner("Re-deploying without the missing columns…"):
+                            ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only, drop_cols=dropcols)
+                        st.rerun()
+
             if r.get("blocked"):
-                st.error("Validate failed - nothing imported.")
+                st.error("Validate failed - nothing imported (see above).")
             elif r.get("imported"):
                 st.write("**Import:**")
                 st.table([{"status": v["status"], "type": v["type"], "name": v["name"],
                            "new_id": v.get("new_id"), "error": v.get("error") or ""} for v in r["imported"]])
                 st.success(f"Deployed to `{tgt}`. Re-run is idempotent.")
+
+                # ── Post-import reconciliation: verify against the LIVE target ──
+                with st.spinner("Reconciling against the target org…"):
+                    try:
+                        tc = pipeline.org_client(r["org"], role="target")
+                        rec = reconcile(tc, r["imported"])
+                    except Exception as e:
+                        rec = None
+                        st.warning(f"Reconcile skipped - {type(e).__name__}: {str(e)[:160]}")
+                if rec is not None:
+                    st.write("**Reconciliation (live target truth):**")
+                    st.table([{"verdict": f["verdict"], "type": f["type"],
+                               "name": f["name"], "detail": f.get("detail", "")} for f in rec])
+                    bad = [f for f in rec if f["verdict"] in ("duplicate", "missing")]
+                    if bad:
+                        st.error(f"{len(bad)} object(s) did not reconcile cleanly: "
+                                 + ", ".join(f"{f['name']} ({f['verdict']})" for f in bad))
+                    else:
+                        st.success("All promoted objects verified present on the target.")
+
+                # ── Optional: promote Spotter coaching (BETA; needs 10.15.0.cl+) ──
+                with st.expander("Promote Spotter coaching (optional · beta · needs 10.15.0.cl+)"):
+                    st.caption("Carries Spotter NL instructions across orgs (not in TML). Merge = add "
+                               "source's to the target's; Replace = target ends with only the source's. "
+                               "Not yet verified on a live cluster - use with care.")
+                    mode = st.radio("Spotter NL instructions", ["Skip", "Merge", "Replace"],
+                                    horizontal=True, key="spotter_mode")
+                    if mode != "Skip" and st.button("Promote Spotter coaching"):
+                        models = [{"name": v["name"], "obj_id": v.get("new_id"), "source_guid": None}
+                                  for v in r["imported"] if v.get("type") == "LOGICAL_TABLE"]
+                        try:
+                            sc = pipeline.org_client(os.environ.get("TS_ORG_SOURCE", "0"))
+                            tc2 = pipeline.org_client(r["org"], role="target")
+                            rep = nl_instructions.promote(sc, tc2, models, mode=mode.lower())
+                            st.table([{ "model": x.get("name"), "available": x.get("available"),
+                                        "result": x.get("reason") or x.get("status") or "ok"} for x in rep])
+                        except Exception as e:
+                            st.error(f"Spotter promote failed - {type(e).__name__}: {str(e)[:200]}")
 
 # ── repo state ─────────────────────────────────────────────────────────────────────
 with tabs[4]:
@@ -460,7 +526,7 @@ with tabs[4]:
         try:
             g = pipeline.git()
             st.session_state.io_repo = {
-                "files": sorted(f for f in g.read_area(pipeline.RELEASE) if f.endswith(".tml")),
+                "files": sorted(f for f in g.read_area(pipeline._release_area()) if f.endswith(".tml")),
                 "commits": [(c.sha[:8], c.commit.message.splitlines()[0])
                             for c in g._repo.get_commits(sha="main")[:10]],
             }
