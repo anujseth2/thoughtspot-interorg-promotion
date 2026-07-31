@@ -259,14 +259,20 @@ def _targets() -> dict:
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
-def deploy(target: str, validate_only: bool = False) -> dict:
+def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
     """Deploy release/ into a target org, remapping the connection to that org's.
 
     `target` is a key in variables/targets.json ({org_id, connection, ...}). Order:
     tables first; VALIDATE_ONLY runs first and a failed validate BLOCKS the import.
     Never deletes. obj_id alignment across orgs is a one-time setup step (align_obj_id),
     not part of deploy, because a physical-match import keeps the existing obj_id.
+
+    On a failed validate the result carries `findings` = classify_import_errors(...), turning
+    raw TS errors into reviewer-actionable causes/fixes. `drop_cols` (['table::col', ...]) lets
+    the caller re-deploy with warehouse-missing columns (+ their dependent vizs) removed, for
+    when the target warehouse lags the source.
     """
+    from services.import_diagnostics import classify_import_errors, drop_columns as _drop_columns
     cfg = _targets().get(target)
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
@@ -275,6 +281,9 @@ def deploy(target: str, validate_only: bool = False) -> dict:
     if not files:
         raise RuntimeError("release/ is empty in Git — run snapshot first")
     docs = [load_tml(v) for v in files.values()]
+    dropped = None
+    if drop_cols:                                    # remove warehouse-missing columns + dependents
+        docs, dropped = _drop_columns(docs, list(drop_cols))
     for d in docs:                                   # remap connection to the target org's
         if cfg.get("connection"):
             retarget_connection(d, cfg["connection"])
@@ -289,10 +298,11 @@ def deploy(target: str, validate_only: bool = False) -> dict:
     errs = [r for r in validate if r["status"] != "OK"]
     if validate_only or errs:                        # gate: never import on a failed validate
         return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
-                "imported": None, "blocked": bool(errs)}
+                "findings": classify_import_errors(validate) if errs else [],
+                "imported": None, "blocked": bool(errs), "dropped": dropped}
     results = ts.import_tml(strings, policy="ALL_OR_NONE")
     return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
-            "imported": results, "blocked": False}
+            "findings": [], "imported": results, "blocked": False, "dropped": dropped}
 
 
 def align_obj_id(org, current_obj_id: str, new_obj_id: str) -> dict:
