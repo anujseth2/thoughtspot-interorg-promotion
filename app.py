@@ -47,19 +47,31 @@ with tabs[0]:
                "Step 2 unlocks once this connects.")
     host = st.text_input("Host", value=os.environ.get("TS_HOST", ""),
                          placeholder="https://your-instance.thoughtspot.cloud")
-    auth = st.radio("Primary auth method",
-                    ["Secret key (trusted auth)", "Bearer token", "Username + password"],
+    _auth_opts = ["Secret key (trusted auth)", "Bearer token", "Username + password"]
+    _auth_idx = (1 if os.environ.get("TS_TOKEN") and not os.environ.get("TS_SECRET_KEY")
+                 else 2 if os.environ.get("TS_PASSWORD") and not os.environ.get("TS_SECRET_KEY")
+                 else 0)
+    auth = st.radio("Primary auth method", _auth_opts, index=_auth_idx,
                     horizontal=True,
                     help="Secret key: SSO/MFA orgs, where basic login is blocked; mints a "
                          "short-lived per-org token.  Bearer token: you already hold one "
                          "(it is bound to the org it was minted for).  Username + password: "
                          "local (non-SSO) accounts only.")
-    user = secret = token = password = ""
+    user = secret = token = target_token = password = ""
     if auth.startswith("Secret"):
         user = st.text_input("Username (token is minted for this user)", value=os.environ.get("TS_USER", ""))
         secret = st.text_input("Trusted-auth secret key", value=os.environ.get("TS_SECRET_KEY", ""), type="password")
     elif auth.startswith("Bearer"):
-        token = st.text_input("Bearer token", value=os.environ.get("TS_TOKEN", ""), type="password")
+        st.caption("Bearer tokens are **org-bound**, so provide one per side: the **source** token "
+                   "(where you snapshot from) and the **target** token (where you deploy to). "
+                   "A trusted-auth secret would cover both with one credential.")
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            token = st.text_input("Source bearer token (snapshot)", value=os.environ.get("TS_TOKEN", ""),
+                                  type="password", key="src_bearer")
+        with bc2:
+            target_token = st.text_input("Target bearer token (deploy)", value=os.environ.get("TS_TOKEN_TARGET", ""),
+                                         type="password", key="tgt_bearer")
     else:
         user = st.text_input("Username", value=os.environ.get("TS_USER", ""))
         password = st.text_input("Password", value=os.environ.get("TS_PASSWORD", ""), type="password")
@@ -81,6 +93,7 @@ with tabs[0]:
 
     def _cfg() -> dict:
         return {"host": host.rstrip("/"), "user": user, "secret": secret, "token": token,
+                "target_token": target_token,
                 "password": password, "primary_org": primary_org,
                 "ca_bundle": ca_bundle, "verify_ssl": verify_ssl,
                 "tag": ss.get("tag", ""), "resolve_local": ss.get("resolve_local", True),
