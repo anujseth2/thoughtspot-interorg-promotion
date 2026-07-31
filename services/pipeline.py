@@ -26,9 +26,19 @@ from services.gh_creds import github_repo, github_token
 from services.git_repo import AreaGitRepo, LocalRepo
 
 ROOT = Path(__file__).resolve().parent.parent
-_BASE = os.environ.get("GIT_BASE_PATH", "").strip().replace("\\", "/").strip("/")   # repo subfolder (forward slashes)
-RELEASE = f"{_BASE}/release" if _BASE else "release"   # Git folder for the parameterized TML
-_MANIFEST = f"{_BASE}/variables/manifest.json" if _BASE else "variables/manifest.json"
+# Repo subfolder (GIT_BASE_PATH) + the release/manifest paths are resolved at CALL TIME,
+# not import time - so setting GIT_BASE_PATH from the Setup tab (which runs after this module
+# is imported) actually takes effect. Reading os.environ at import froze it to the root.
+def _base() -> str:
+    return os.environ.get("GIT_BASE_PATH", "").strip().replace("\\", "/").strip("/")
+
+def _release_area() -> str:
+    b = _base()
+    return f"{b}/release" if b else "release"          # Git folder for the parameterized TML
+
+def _manifest_path() -> str:
+    b = _base()
+    return f"{b}/variables/manifest.json" if b else "variables/manifest.json"
 _ORDER = {"connection": 0, "table": 1, "view": 1, "sql_view": 1,
           "model": 2, "worksheet": 2, "answer": 3, "liveboard": 4}
 
@@ -159,22 +169,36 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             if not found:
                 raise RuntimeError("no objects found in the source org")
             ids = [f["id"] for f in found]
-        edocs = ts.export_associated_edocs(ids)
+        edocs, failures = ts.export_associated(ids)
+        if failures:
+            # Do NOT silently drop objects TS couldn't export - a missing dependency (e.g. a
+            # model/table the connecting user can't access) would otherwise produce a thin
+            # release that looks complete. Abort loudly so it's fixed at the source.
+            lines = "\n  - ".join(f"{f['type']} '{f['name']}' -> {f['status']}: {f['error']}"
+                                  for f in failures)
+            raise RuntimeError(
+                f"Export incomplete: {len(failures)} object(s) could not be exported and would be "
+                f"MISSING from the release. This usually means the connecting user lacks access to a "
+                f"dependency (model/table). Grant access in the source org and re-run.\n  - {lines}")
+        if not edocs:
+            raise RuntimeError("Export returned no objects - nothing to snapshot "
+                               "(check the selection and the connecting user's access).")
         docs = [load_tml(e) for e in edocs]
 
     bindings = source_bindings(docs)               # real db/schema, read before parameterizing
     out, used, warns = parameterize_bundle(docs)
     files = {_filename(d): yaml.safe_dump(d, sort_keys=False, width=120) for d in out}
     branch = _branch()
+    release = _release_area()                       # resolve subfolder at call time
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
     # branch=None commits straight to main (unprotected repos / local mode), as before.
-    sha = g.commit_area(RELEASE, files, message="snapshot parameterized release",
+    sha = g.commit_area(release, files, message="snapshot parameterized release",
                         branch=branch, reset_from=(g.main if branch else None))
-    g.put_file(_MANIFEST, json.dumps(sorted(used), indent=2),
+    g.put_file(_manifest_path(), json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
     # prune stale files left by a previous (different) snapshot, so a release fully replaces
-    pruned = [fn for fn in list(g.read_area(RELEASE, ref=branch)) if fn.endswith(".tml") and fn not in files
-              and g.delete_file(f"{RELEASE}/{fn}", "chore: drop stale release file", branch=branch)]
+    pruned = [fn for fn in list(g.read_area(release, ref=branch)) if fn.endswith(".tml") and fn not in files
+              and g.delete_file(f"{release}/{fn}", "chore: drop stale release file", branch=branch)]
     pr_url = None
     if branch:                                  # open (or reuse) a PR into main for review/merge
         try:
@@ -232,7 +256,7 @@ def deploy(target: str, validate_only: bool = False) -> dict:
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
     ts = org_client(cfg["org_id"])
-    files = {k: v for k, v in git().read_area(RELEASE, ref=_branch()).items() if k.endswith(".tml")}
+    files = {k: v for k, v in git().read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
     if not files:
         raise RuntimeError("release/ is empty in Git — run snapshot first")
     docs = [load_tml(v) for v in files.values()]
