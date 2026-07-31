@@ -122,7 +122,11 @@ def _branch():
 def _filename(doc: dict) -> str:
     typ = tml_type(doc) or "object"
     base = doc.get("obj_id") or (doc.get(typ, {}) or {}).get("name", "object")
-    base = re.sub(r"[^0-9A-Za-z]+", "_", base.split("__")[0]).strip("_").lower() or "object"
+    # Use the FULL obj_id (the cross-org identity) as the filename base. Do NOT split on "__":
+    # that was an intra-org area-tool convention (obj_id = base__area) and it collapses real
+    # names that contain "__" (e.g. DIM_BUREAU_ACCOUNTS__PRODUCER/__POLICY/__ACCOUNT all mapped
+    # to one file -> tables silently overwritten in the release).
+    base = re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower() or "object"
     return f"{base}.{typ}.tml"
 
 
@@ -192,7 +196,13 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
 
     bindings = source_bindings(docs)               # real db/schema, read before parameterizing
     out, used, warns = parameterize_bundle(docs)
-    files = {_filename(d): yaml.safe_dump(d, sort_keys=False, width=120) for d in out}
+    files = {}
+    for d in out:                                  # guard: never let two objects share a filename
+        fn = _filename(d)
+        if fn in files:
+            raise RuntimeError(f"filename collision on '{fn}' - two objects would map to the same "
+                               "release file (one silently dropped). Report this obj_id/name.")
+        files[fn] = yaml.safe_dump(d, sort_keys=False, width=120)
     branch = _branch()
     release = _release_area()                       # resolve subfolder at call time
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
