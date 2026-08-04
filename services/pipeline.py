@@ -223,9 +223,9 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             raise RuntimeError(f"filename collision on '{fn}' - two objects would map to the same "
                                "release file (one silently dropped). Report this obj_id/name.")
         files[fn] = yaml.safe_dump(d, sort_keys=False, width=120)
-    # per-object manifest so the UI can show friendly Name/Type next to the obj_id filename
+    # per-object manifest so the UI can show friendly Name/Type + the editable obj_id
     objects = [{"file": _filename(d), "name": (d.get(tml_type(d), {}) or {}).get("name", ""),
-                "type": tml_type(d) or "object"} for d in out]
+                "type": tml_type(d) or "object", "obj_id": d.get("obj_id", "")} for d in out]
     branch = _branch()
     release = _release_area()                       # resolve subfolder at call time
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
@@ -280,6 +280,32 @@ def _targets() -> dict:
     p = ROOT / "variables" / "targets.json"
     raw = json.loads(p.read_text()) if p.exists() else {}
     return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def realign_release(old_to_new: dict) -> dict:
+    """Rewrite obj_ids IN THE RELEASE (not the source cluster) to align with the target org's
+    existing objects, so deploy updates-in-place instead of creating duplicates. For each
+    old->new, text-replaces the obj_id across ALL release files (the object's own obj_id AND every
+    reference to it), recomputes the obj_id-based filenames, re-commits, and prunes the old files.
+    obj_ids are unique strings, so a text replace is safe. No source-cluster changes."""
+    old_to_new = {o: n for o, n in (old_to_new or {}).items() if o and n and o != n}
+    if not old_to_new:
+        return {"changed": [], "files": []}
+    g = git()
+    release = _release_area()
+    branch = _branch()
+    area = {fn: txt for fn, txt in g.read_area(release, ref=branch).items() if fn.endswith(".tml")}
+    new_files = {}
+    for txt in area.values():
+        for old, new in old_to_new.items():
+            txt = txt.replace(old, new)
+        new_files[_filename(load_tml(txt))] = txt          # filename follows the (new) obj_id
+    sha = g.commit_area(release, new_files, message="align obj_ids to target",
+                        branch=branch, reset_from=(g.main if branch else None))
+    pruned = [fn for fn in list(g.read_area(release, ref=branch)) if fn.endswith(".tml")
+              and fn not in new_files
+              and g.delete_file(f"{release}/{fn}", "chore: drop renamed release file", branch=branch)]
+    return {"changed": list(old_to_new.items()), "files": sorted(new_files), "sha": sha, "pruned": pruned}
 
 
 def _resolve_var(val, vals):
