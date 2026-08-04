@@ -6,3 +6,5 @@ __pycache__/
 variables/values.json
 variables/targets.json
 variables/orgs.json
+.demo_release/
+*.predemo.bak

@@ -350,6 +350,45 @@ def check_target_alignment(target: str) -> dict:
     return {"rows": rows, "suggest": suggest}
 
 
+def check_alignment_objects(objects, target) -> dict:
+    """Same as check_target_alignment but on a passed object list [{name, type(tml), obj_id}] instead
+    of the release, so the UI can show alignment on the SELECTION grid (before snapshotting).
+    Returns {rows:[{name,type,obj_id,verdict,target_obj_id}], suggest:{source_obj_id: target_obj_id}}."""
+    from services.ts_client import api_metadata_type
+    cfg = _targets().get(target)
+    if not cfg:
+        raise RuntimeError(f"target '{target}' not in variables/targets.json")
+    ts = org_client(cfg["org_id"], role="target")
+    rows, suggest = [], {}
+    for o in objects:
+        name, oid, t = o.get("name", ""), o.get("obj_id", ""), o.get("type", "object")
+        api = api_metadata_type(t)
+
+        def _search(payload):
+            r = ts._post("/api/rest/2.0/metadata/search", payload)
+            return r if isinstance(r, list) else r.get("metadata", [])
+        try:
+            has_oid = bool(_search({"metadata": [{"type": api, "obj_identifier": oid}], "record_size": 1}))
+        except Exception:
+            has_oid = False
+        if has_oid:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "in_place", "target_obj_id": oid})
+            continue
+        tobj = ""
+        try:
+            cand = next((it for it in _search({"metadata": [{"type": api, "identifier": name}], "record_size": -1})
+                         if it.get("metadata_name") == name), None)
+            tobj = (cand or {}).get("metadata_obj_id", "")
+        except Exception:
+            tobj = ""
+        if tobj and tobj != oid:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "would_duplicate", "target_obj_id": tobj})
+            suggest[oid] = tobj
+        else:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "new", "target_obj_id": ""})
+    return {"rows": rows, "suggest": suggest}
+
+
 def align_source_obj_ids(old_to_new: dict, source_org=None) -> dict:
     """Change obj_ids ON THE SOURCE ORG (via update-obj-id) so source == release == target and the
     promotion updates in place. This is the correct, persistent alignment: a release obj_id can't

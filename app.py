@@ -22,12 +22,13 @@ _TYF = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "workshe
         "table": "Table", "view": "View", "sql_view": "SQL View"}
 
 
-def _select_set(dp, namemap, key):
+def _select_set(dp, namemap, key, src=None):
     """Selectable resolved-set editor used by every scope (Pick assets / By tag / By collection).
     dp = {groups:[{root_id, objects:[{name,type,obj_id,guid}]}], failures} from preview_dependencies;
     namemap = {root_id: display name}. Renders the deduped set (roots + dependencies) with an
     Include checkbox (default on) + a 'Used by' column, and returns the guids the user kept — so the
-    snapshot promotes exactly that set. Returns [] when nothing is resolved/selected."""
+    snapshot promotes exactly that set. Also renders the obj_id alignment vs target inline (right on
+    this selection view) for the kept objects. Returns [] when nothing is resolved/selected."""
     if not dp:
         return []
     if dp.get("error"):
@@ -40,7 +41,8 @@ def _select_set(dp, namemap, key):
         for o in g["objects"]:
             gid = o.get("guid") or o.get("obj_id")
             e = flat.setdefault(gid, {"Name": o["name"], "Type": _TYF.get(o["type"], o["type"]),
-                                      "obj_id": o["obj_id"], "guid": gid, "_used": set()})
+                                      "rawtype": o["type"], "obj_id": o["obj_id"], "guid": gid,
+                                      "_used": set()})
             e["_used"].add(rn)
     if dp.get("failures"):
         st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
@@ -60,7 +62,59 @@ def _select_set(dp, namemap, key):
                        "obj_id": st.column_config.TextColumn(disabled=True),
                        "Used by": st.column_config.TextColumn(disabled=True),
                        "guid": None})
-    return [r["guid"] for r in ed.to_dict("records") if r.get("Include")]
+    kept = [r["guid"] for r in ed.to_dict("records") if r.get("Include")]
+    sel_objs = [{"name": flat[g]["Name"], "type": flat[g]["rawtype"], "obj_id": flat[g]["obj_id"]}
+                for g in kept if g in flat]
+    _align_section(sel_objs, key, src)
+    return kept
+
+
+def _align_section(objects, key, src=None):
+    """obj_id alignment vs a target, rendered inline on the selection view (before Snapshot).
+    For the kept `objects` [{name,type(tml),obj_id}] it checks each obj_id against a chosen target:
+    in_place (updates in place), would_duplicate (a differently-id'd twin exists → creates a dup), or
+    new. would_duplicate rows can be aligned ON THE SOURCE so the next snapshot lands in place."""
+    tg = pipeline._targets()
+    if not tg or not objects:
+        return
+    with st.expander(f"🔗 obj_id alignment vs target ({len(objects)} object(s) selected)", expanded=False):
+        st.caption("Does each selected object's obj_id already exist in the target? If a same-named "
+                   "object exists under a DIFFERENT obj_id, promoting would create a duplicate — align "
+                   "the source's obj_id to the target's first.")
+        atgt = st.selectbox("Target to check against", list(tg),
+                            format_func=lambda k: tg[k].get("name", k), key=f"{key}_atgt")
+        if st.button("Check obj_id alignment", key=f"{key}_abtn"):
+            with st.spinner("Checking obj_ids in target…"):
+                try:
+                    st.session_state[f"{key}_ares"] = pipeline.check_alignment_objects(objects, atgt)
+                    st.session_state[f"{key}_afor"] = atgt
+                except Exception as e:
+                    st.error(f"Alignment check failed: {e}")
+        ar = st.session_state.get(f"{key}_ares")
+        if ar and st.session_state.get(f"{key}_afor") == atgt:
+            _vlabel = {"in_place": "✅ in place", "would_duplicate": "⚠️ would DUPLICATE", "new": "🆕 new"}
+            disp = [{"Name": r["name"], "Type": _TYF.get(r["type"], r["type"]),
+                     "source obj_id": r["obj_id"], "verdict": _vlabel.get(r["verdict"], r["verdict"]),
+                     "target obj_id": r.get("target_obj_id", "")} for r in ar.get("rows", [])]
+            st.dataframe(pd.DataFrame(disp), hide_index=True, use_container_width=True)
+            dups = ar.get("suggest") or {}
+            if dups:
+                st.warning(f"{len(dups)} object(s) would DUPLICATE in the target. Align them on the "
+                           "SOURCE org so the next snapshot updates in place:")
+                if st.button("Align these on the SOURCE org", key=f"{key}_aapply", type="primary"):
+                    with st.spinner("Rewriting obj_ids on the source org…"):
+                        try:
+                            res = pipeline.align_source_obj_ids(dups, src)
+                            if res.get("errors"):
+                                st.error("Some rewrites failed: " + "; ".join(res["errors"]))
+                            if res.get("done"):
+                                st.success(f"Aligned {len(res['done'])} obj_id(s) on the source. "
+                                           "Re-check or re-resolve, then Snapshot.")
+                            st.session_state.pop(f"{key}_ares", None)
+                        except Exception as e:
+                            st.error(f"Align failed: {e}")
+            else:
+                st.success("No duplicates — every selected object aligns in place or is new.")
 
 
 def _refresh_snap_manifest():
@@ -406,7 +460,7 @@ with tabs[1]:
                                 ss["deps_preview"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                         ss["deps_key"] = key
                     object_ids = _select_set(ss.get("deps_preview"),
-                                             {a["id"]: a["name"] for a in assets}, "sel_pick")
+                                             {a["id"]: a["name"] for a in assets}, "sel_pick", src)
             else:
                 st.info("Click **List assets in the source org** to choose objects.")
         elif scope == "By tag":
@@ -465,7 +519,7 @@ with tabs[1]:
                                     ss["tag_deps"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                             ss["tag_deps_key"] = key
                         object_ids = _select_set(ss.get("tag_deps"),
-                                                 {r["id"]: r["name"] for r in roots}, "sel_tag")
+                                                 {r["id"]: r["name"] for r in roots}, "sel_tag", src)
         elif scope == "By collection":
             if st.button("List collections in the source org"):
                 try:
@@ -491,7 +545,7 @@ with tabs[1]:
                 if (ss.get("coll_deps") or {}).get("empty"):
                     st.warning("Collection has no promotable members.")
                 else:
-                    object_ids = _select_set(ss.get("coll_deps"), ss.get("coll_namemap", {}), "sel_coll")
+                    object_ids = _select_set(ss.get("coll_deps"), ss.get("coll_namemap", {}), "sel_coll", src)
             else:
                 st.info("Click **List collections in the source org** to choose one.")
 
