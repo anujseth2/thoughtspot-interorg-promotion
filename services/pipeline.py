@@ -145,6 +145,21 @@ def list_source_collections(source_org=None):
     return ts.list_collections()
 
 
+def preview_dependencies(object_ids, source_org=None):
+    """Resolve what a set of picked assets will ACTUALLY promote — the objects + their full
+    dependency chain (model, tables) — so the operator sees it before snapshotting. Same export
+    path the snapshot uses, so the preview matches the release exactly. Returns
+    {objects: [{name, type, obj_id}], failures: [...]}."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    edocs, failures = ts.export_associated(list(object_ids))
+    objs = []
+    for e in edocs:
+        d = load_tml(e)
+        t = tml_type(d) or "object"
+        objs.append({"name": (d.get(t, {}) or {}).get("name", ""), "type": t, "obj_id": d.get("obj_id", "")})
+    return {"objects": objs, "failures": failures}
+
+
 def resolve_collection(collection_id, source_org=None):
     """[{id, name, type}] of a collection's promotable members in the source org,
     recursing into sub-collections. For the snapshot preview."""
@@ -203,6 +218,9 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             raise RuntimeError(f"filename collision on '{fn}' - two objects would map to the same "
                                "release file (one silently dropped). Report this obj_id/name.")
         files[fn] = yaml.safe_dump(d, sort_keys=False, width=120)
+    # per-object manifest so the UI can show friendly Name/Type next to the obj_id filename
+    objects = [{"file": _filename(d), "name": (d.get(tml_type(d), {}) or {}).get("name", ""),
+                "type": tml_type(d) or "object"} for d in out]
     branch = _branch()
     release = _release_area()                       # resolve subfolder at call time
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
@@ -221,7 +239,7 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
                                f"Parameterized `release/` snapshot. Review and merge to record it on `{g.main}`.")
         except Exception as e:
             warns.append(f"committed to '{branch}', but no PR opened: {str(e)[:140]}")
-    return {"files": list(files), "variables": sorted(used), "warnings": warns,
+    return {"files": list(files), "objects": objects, "variables": sorted(used), "warnings": warns,
             "sha": sha, "pruned": pruned, "branch": branch, "pr_url": pr_url,
             "source_bindings": [{"db": d, "schema": s} for d, s in bindings]}
 
