@@ -338,13 +338,21 @@ with tabs[1]:
                             except Exception as e:
                                 ss["deps_preview"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                         ss["deps_key"] = key
+                    _tyf = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model",
+                            "worksheet": "Model", "table": "Table", "view": "View", "sql_view": "SQL View"}
                     dp = ss.get("deps_preview") or {}
                     if dp.get("error"):
                         st.warning(f"Couldn't resolve dependencies - {dp['error']}")
-                    elif dp.get("objects"):
-                        st.caption(f"**Will promote {len(dp['objects'])} object(s)** (selected + resolved dependencies):")
-                        st.table([{"Name": o["name"], "Type": _ty.get(o["type"], o["type"]), "obj_id": o["obj_id"]}
-                                  for o in dp["objects"]])
+                    elif dp.get("groups"):
+                        total = sum(len(g["objects"]) for g in dp["groups"])
+                        st.caption(f"**Will promote {total} object(s)** — grouped by the asset you picked "
+                                   "(a shared table appears under each asset that uses it):")
+                        for g in dp["groups"]:
+                            root = idmap.get(g["root_id"], {}).get("name", g["root_id"])
+                            st.markdown(f"↳ **{root}**")
+                            df = pd.DataFrame([{"Name": o["name"], "Type": _tyf.get(o["type"], o["type"]),
+                                                "obj_id": o["obj_id"]} for o in g["objects"]])
+                            st.dataframe(df, hide_index=True, use_container_width=True)
                         if dp.get("failures"):
                             st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
                                      + ", ".join(f"{f.get('type')} '{f.get('name')}'" for f in dp["failures"]))
@@ -404,8 +412,10 @@ with tabs[1]:
             _ty2 = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
                     "table": "Table", "view": "View", "sql_view": "SQL View"}
             if r.get("objects"):
-                st.table([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
-                           "file": o.get("file", "")} for o in r["objects"]])
+                st.dataframe(pd.DataFrame([{"Name": o.get("name", ""),
+                                            "Type": _ty2.get(o.get("type"), o.get("type")),
+                                            "file": o.get("file", "")} for o in r["objects"]]),
+                             hide_index=True, use_container_width=True)
             else:
                 st.table([{"file": f} for f in r["files"]])
             if r["warnings"]:

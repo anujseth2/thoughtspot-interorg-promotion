@@ -146,18 +146,23 @@ def list_source_collections(source_org=None):
 
 
 def preview_dependencies(object_ids, source_org=None):
-    """Resolve what a set of picked assets will ACTUALLY promote — the objects + their full
-    dependency chain (model, tables) — so the operator sees it before snapshotting. Same export
-    path the snapshot uses, so the preview matches the release exactly. Returns
-    {objects: [{name, type, obj_id}], failures: [...]}."""
+    """Resolve what a set of picked assets will ACTUALLY promote — each selected asset + its full
+    dependency chain (model, tables) — so the operator sees it before snapshotting. Resolved
+    PER selected asset (one export per asset) so the UI can show which dependency belongs to which
+    pick; shared tables legitimately appear under each asset that uses them. Same export path the
+    snapshot uses. Returns {groups: [{root_id, objects:[{name,type,obj_id}]}], failures:[...]}."""
     ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
-    edocs, failures = ts.export_associated(list(object_ids))
-    objs = []
-    for e in edocs:
-        d = load_tml(e)
-        t = tml_type(d) or "object"
-        objs.append({"name": (d.get(t, {}) or {}).get("name", ""), "type": t, "obj_id": d.get("obj_id", "")})
-    return {"objects": objs, "failures": failures}
+    groups, failures = [], []
+    for oid in object_ids:
+        edocs, fails = ts.export_associated([oid])
+        objs = []
+        for e in edocs:
+            d = load_tml(e)
+            t = tml_type(d) or "object"
+            objs.append({"name": (d.get(t, {}) or {}).get("name", ""), "type": t, "obj_id": d.get("obj_id", "")})
+        groups.append({"root_id": oid, "objects": objs})
+        failures += fails
+    return {"groups": groups, "failures": failures}
 
 
 def resolve_collection(collection_id, source_org=None):
