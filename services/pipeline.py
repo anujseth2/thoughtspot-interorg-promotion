@@ -300,6 +300,56 @@ def _targets() -> dict:
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
+def check_target_alignment(target: str) -> dict:
+    """obj_id alignment check: for each object in the release, ask the TARGET org whether the
+    source obj_id already lands there. Per object -> one of:
+      in_place       - target already has an object with this obj_id (import updates in place) OK
+      would_duplicate- target has the same NAME under a DIFFERENT obj_id -> import would create a
+                       DUPLICATE; align the release obj_id to the target's (suggest map) first
+      new            - target has no such object -> created fresh on import
+    Returns {rows:[{name,type,obj_id,verdict,target_obj_id}], suggest:{source_obj_id: target_obj_id}}.
+    Lightweight (inter-org, same warehouse) - no column-overlap scoring; matches by obj_id then name."""
+    from services.ts_client import api_metadata_type
+    cfg = _targets().get(target)
+    if not cfg:
+        raise RuntimeError(f"target '{target}' not in variables/targets.json")
+    ts = org_client(cfg["org_id"], role="target")
+    area = {fn: txt for fn, txt in git().read_area(_release_area(), ref=_branch()).items()
+            if fn.endswith(".tml")}
+    rows, suggest = [], {}
+    for txt in area.values():
+        d = load_tml(txt)
+        t = tml_type(d) or "object"
+        name = (d.get(t, {}) or {}).get("name", "")
+        oid = d.get("obj_id", "")
+        api = api_metadata_type(t)
+
+        def _search(payload):
+            r = ts._post("/api/rest/2.0/metadata/search", payload)
+            return r if isinstance(r, list) else r.get("metadata", [])
+
+        try:
+            has_oid = bool(_search({"metadata": [{"type": api, "obj_identifier": oid}], "record_size": 1}))
+        except Exception:
+            has_oid = False
+        if has_oid:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "in_place", "target_obj_id": oid})
+            continue
+        tobj = ""
+        try:
+            cand = next((it for it in _search({"metadata": [{"type": api, "identifier": name}], "record_size": -1})
+                         if it.get("metadata_name") == name), None)
+            tobj = (cand or {}).get("metadata_obj_id", "")
+        except Exception:
+            tobj = ""
+        if tobj and tobj != oid:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "would_duplicate", "target_obj_id": tobj})
+            suggest[oid] = tobj
+        else:
+            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "new", "target_obj_id": ""})
+    return {"rows": rows, "suggest": suggest}
+
+
 def realign_release(old_to_new: dict) -> dict:
     """Rewrite obj_ids IN THE RELEASE (not the source cluster) to align with the target org's
     existing objects, so deploy updates-in-place instead of creating duplicates. For each
