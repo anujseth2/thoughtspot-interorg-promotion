@@ -22,29 +22,45 @@ _TYF = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "workshe
         "table": "Table", "view": "View", "sql_view": "SQL View"}
 
 
-def _render_deps(dp, namemap):
-    """Render a grouped dependency preview (used by Pick assets / By collection / By tag).
-    dp = {groups:[{root_id, objects}], failures:[...]} from pipeline.preview_dependencies;
-    namemap = {root_id: display name}."""
+def _select_set(dp, namemap, key):
+    """Selectable resolved-set editor used by every scope (Pick assets / By tag / By collection).
+    dp = {groups:[{root_id, objects:[{name,type,obj_id,guid}]}], failures} from preview_dependencies;
+    namemap = {root_id: display name}. Renders the deduped set (roots + dependencies) with an
+    Include checkbox (default on) + a 'Used by' column, and returns the guids the user kept — so the
+    snapshot promotes exactly that set. Returns [] when nothing is resolved/selected."""
     if not dp:
-        return
+        return []
     if dp.get("error"):
         st.warning(f"Couldn't resolve dependencies - {dp['error']}")
-        return
+        return []
     groups = dp.get("groups") or []
-    if not groups:
-        return
-    total = sum(len(g["objects"]) for g in groups)
-    st.caption(f"**Will promote {total} object(s)** — grouped by selected asset "
-               "(a shared table appears under each asset that uses it):")
+    flat = {}
     for g in groups:
-        st.markdown(f"↳ **{namemap.get(g['root_id'], g['root_id'])}**")
-        st.dataframe(pd.DataFrame([{"Name": o["name"], "Type": _TYF.get(o["type"], o["type"]),
-                                    "obj_id": o["obj_id"]} for o in g["objects"]]),
-                     hide_index=True, use_container_width=True)
+        rn = namemap.get(g["root_id"], g["root_id"])
+        for o in g["objects"]:
+            gid = o.get("guid") or o.get("obj_id")
+            e = flat.setdefault(gid, {"Name": o["name"], "Type": _TYF.get(o["type"], o["type"]),
+                                      "obj_id": o["obj_id"], "guid": gid, "_used": set()})
+            e["_used"].add(rn)
     if dp.get("failures"):
         st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
                  + ", ".join(f"{f.get('type')} '{f.get('name')}'" for f in dp["failures"]))
+    if not flat:
+        return []
+    st.caption(f"**{len(flat)} object(s) resolved** — untick any you don't want to promote (e.g. a "
+               "table that already exists in the target; it resolves there by obj_id). Note: dropping "
+               "a model/table that a kept object needs will fail on import unless the target has it.")
+    rows = [{"Include": True, "Name": v["Name"], "Type": v["Type"], "obj_id": v["obj_id"],
+             "Used by": ", ".join(sorted(v["_used"])), "guid": v["guid"]} for v in flat.values()]
+    ed = st.data_editor(
+        pd.DataFrame(rows), hide_index=True, use_container_width=True, key=key,
+        column_config={"Include": st.column_config.CheckboxColumn("Include"),
+                       "Name": st.column_config.TextColumn(disabled=True),
+                       "Type": st.column_config.TextColumn(disabled=True),
+                       "obj_id": st.column_config.TextColumn(disabled=True),
+                       "Used by": st.column_config.TextColumn(disabled=True),
+                       "guid": None})
+    return [r["guid"] for r in ed.to_dict("records") if r.get("Include")]
 
 load_dotenv()
 
@@ -350,24 +366,21 @@ with tabs[1]:
                 with a2:
                     if st.button("Clear set", disabled=not ss.get("asset_pick")):
                         ss["asset_pick"] = []
-                object_ids = ss.get("asset_pick", [])
+                root_ids = ss.get("asset_pick", [])
                 with a3:
-                    st.caption(f"Promotion set: **{len(object_ids)}** asset(s)  ·  showing {len(rows)} of {len(assets)}")
-                if object_ids:
-                    idmap = {a["id"]: a for a in assets}
-                    st.caption("**Selected:**")
-                    st.table([{"Name": idmap.get(i, {}).get("name", i),
-                               "Type": _kd.get(_kind(idmap.get(i, {})), "")} for i in object_ids])
-                    # Auto-resolve the FULL dependency chain that will actually promote (cached per set)
-                    key = tuple(sorted(object_ids))
+                    st.caption(f"Picked roots: **{len(root_ids)}**  ·  showing {len(rows)} of {len(assets)}")
+                object_ids = []
+                if root_ids:
+                    key = tuple(sorted(root_ids))
                     if ss.get("deps_key") != key:
                         with st.spinner("Resolving dependencies…"):
                             try:
-                                ss["deps_preview"] = pipeline.preview_dependencies(object_ids, src or None)
+                                ss["deps_preview"] = pipeline.preview_dependencies(root_ids, src or None)
                             except Exception as e:
                                 ss["deps_preview"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                         ss["deps_key"] = key
-                    _render_deps(ss.get("deps_preview"), {a["id"]: a["name"] for a in assets})
+                    object_ids = _select_set(ss.get("deps_preview"),
+                                             {a["id"]: a["name"] for a in assets}, "sel_pick")
             else:
                 st.info("Click **List assets in the source org** to choose objects.")
         elif scope == "By tag":
@@ -412,19 +425,21 @@ with tabs[1]:
                     with b2:
                         if st.button("Clear set", disabled=not ss.get("tag_pick"), key="tag_clear"):
                             ss["tag_pick"] = []
-                    object_ids = ss.get("tag_pick", [])            # tag scope promotes the SELECTED roots
+                    root_ids = ss.get("tag_pick", [])              # tagged roots the user picked
                     with b3:
-                        st.caption(f"Promotion set: **{len(object_ids)}** of {len(roots)} tagged asset(s)")
-                    if object_ids:
-                        key = tuple(sorted(object_ids))
+                        st.caption(f"Picked roots: **{len(root_ids)}** of {len(roots)} tagged asset(s)")
+                    object_ids = []
+                    if root_ids:
+                        key = tuple(sorted(root_ids))
                         if ss.get("tag_deps_key") != key:
                             with st.spinner("Resolving dependencies…"):
                                 try:
-                                    ss["tag_deps"] = pipeline.preview_dependencies(object_ids, src or None)
+                                    ss["tag_deps"] = pipeline.preview_dependencies(root_ids, src or None)
                                 except Exception as e:
                                     ss["tag_deps"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                             ss["tag_deps_key"] = key
-                        _render_deps(ss.get("tag_deps"), {r["id"]: r["name"] for r in roots})
+                        object_ids = _select_set(ss.get("tag_deps"),
+                                                 {r["id"]: r["name"] for r in roots}, "sel_tag")
         elif scope == "By collection":
             if st.button("List collections in the source org"):
                 try:
@@ -450,25 +465,23 @@ with tabs[1]:
                 if (ss.get("coll_deps") or {}).get("empty"):
                     st.warning("Collection has no promotable members.")
                 else:
-                    _render_deps(ss.get("coll_deps"), ss.get("coll_namemap", {}))
+                    object_ids = _select_set(ss.get("coll_deps"), ss.get("coll_namemap", {}), "sel_coll")
             else:
                 st.info("Click **List collections in the source org** to choose one.")
 
     if st.button("Snapshot", type="primary"):
-        if scope == "Pick assets" and not object_ids:
-            st.warning("Add at least one asset to the set (or switch to By tag / All objects).")
-        elif scope == "By tag" and not object_ids:
-            st.warning("Select which tagged object(s) to promote (add them to the set above).")
-        elif scope == "By collection" and not collection:
-            st.warning("Pick a collection (or switch to another scope).")
+        _needs_pick = scope in ("Pick assets", "By tag", "By collection")
+        if _needs_pick and not object_ids:
+            st.warning("Select the objects to promote in the table above (tick the ones you want).")
         else:
             try:
                 with st.spinner("Parameterizing + writing release…"):
-                    # Pick assets AND By tag both drive off the selected object_ids (the chosen roots);
-                    # dependencies are pulled in on export. Collection/All use their own scope.
-                    ss["snap_result"] = pipeline.snapshot(source_org=src or None,
-                                                          from_seed=from_seed, object_ids=object_ids or None,
-                                                          collection=collection or None)
+                    # Pick assets / By tag / By collection all resolve to a hand-picked set of guids
+                    # in `object_ids`; export EXACTLY those (include_dependencies=False) so unticked
+                    # objects are omitted. "All objects in the org" leaves object_ids empty -> full org.
+                    ss["snap_result"] = pipeline.snapshot(source_org=src or None, from_seed=from_seed,
+                                                          object_ids=object_ids or None,
+                                                          include_dependencies=(not _needs_pick))
             except Exception as e:
                 # An incomplete export (e.g. a dependency the user can't access) aborts here
                 # instead of writing a thin release that looks complete. Show it, don't hide it.

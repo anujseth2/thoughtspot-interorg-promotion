@@ -159,7 +159,8 @@ def preview_dependencies(object_ids, source_org=None):
         for e in edocs:
             d = load_tml(e)
             t = tml_type(d) or "object"
-            objs.append({"name": (d.get(t, {}) or {}).get("name", ""), "type": t, "obj_id": d.get("obj_id", "")})
+            objs.append({"name": (d.get(t, {}) or {}).get("name", ""), "type": t,
+                         "obj_id": d.get("obj_id", ""), "guid": d.get("guid", "")})
         groups.append({"root_id": oid, "objects": objs})
         failures += fails
     return {"groups": groups, "failures": failures}
@@ -188,14 +189,14 @@ def resolve_collection(collection_id, source_org=None):
 
 
 def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
-             collection=None) -> dict:
+             collection=None, include_dependencies=True) -> dict:
     g = git()
     if from_seed:
         docs = [load_tml(p.read_text()) for p in sorted((ROOT / "seed").glob("*.tml"))]
     else:
         ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
         types = ["LOGICAL_TABLE", "LIVEBOARD", "ANSWER"]
-        if object_ids:                             # explicit asset selection (deps pulled in)
+        if object_ids:                             # explicit asset selection
             ids = list(object_ids)
         elif collection:                           # scope the release to a collection (recursed)
             found = ts.resolve_collection(collection)
@@ -213,7 +214,9 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             if not found:
                 raise RuntimeError("no objects found in the source org")
             ids = [f["id"] for f in found]
-        edocs, failures = ts.export_associated(ids)
+        # include_dependencies=False -> export EXACTLY `ids` (a hand-picked set); the operator has
+        # confirmed anything omitted already exists in the target and resolves there by obj_id.
+        edocs, failures = ts.export_associated(ids, associated=include_dependencies)
         if failures:
             # Do NOT silently drop objects TS couldn't export - a missing dependency (e.g. a
             # model/table the connecting user can't access) would otherwise produce a thin
