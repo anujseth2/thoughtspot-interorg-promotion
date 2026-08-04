@@ -18,6 +18,34 @@ from services import pipeline, ui_setup
 from services.reconcile import reconcile
 from services import nl_instructions, feedback_replace
 
+_TYF = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
+        "table": "Table", "view": "View", "sql_view": "SQL View"}
+
+
+def _render_deps(dp, namemap):
+    """Render a grouped dependency preview (used by Pick assets / By collection / By tag).
+    dp = {groups:[{root_id, objects}], failures:[...]} from pipeline.preview_dependencies;
+    namemap = {root_id: display name}."""
+    if not dp:
+        return
+    if dp.get("error"):
+        st.warning(f"Couldn't resolve dependencies - {dp['error']}")
+        return
+    groups = dp.get("groups") or []
+    if not groups:
+        return
+    total = sum(len(g["objects"]) for g in groups)
+    st.caption(f"**Will promote {total} object(s)** — grouped by selected asset "
+               "(a shared table appears under each asset that uses it):")
+    for g in groups:
+        st.markdown(f"↳ **{namemap.get(g['root_id'], g['root_id'])}**")
+        st.dataframe(pd.DataFrame([{"Name": o["name"], "Type": _TYF.get(o["type"], o["type"]),
+                                    "obj_id": o["obj_id"]} for o in g["objects"]]),
+                     hide_index=True, use_container_width=True)
+    if dp.get("failures"):
+        st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
+                 + ", ".join(f"{f.get('type')} '{f.get('name')}'" for f in dp["failures"]))
+
 load_dotenv()
 
 st.set_page_config(page_title="Inter-Org Promotion", layout="wide")
@@ -338,28 +366,38 @@ with tabs[1]:
                             except Exception as e:
                                 ss["deps_preview"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
                         ss["deps_key"] = key
-                    _tyf = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model",
-                            "worksheet": "Model", "table": "Table", "view": "View", "sql_view": "SQL View"}
-                    dp = ss.get("deps_preview") or {}
-                    if dp.get("error"):
-                        st.warning(f"Couldn't resolve dependencies - {dp['error']}")
-                    elif dp.get("groups"):
-                        total = sum(len(g["objects"]) for g in dp["groups"])
-                        st.caption(f"**Will promote {total} object(s)** — grouped by the asset you picked "
-                                   "(a shared table appears under each asset that uses it):")
-                        for g in dp["groups"]:
-                            root = idmap.get(g["root_id"], {}).get("name", g["root_id"])
-                            st.markdown(f"↳ **{root}**")
-                            df = pd.DataFrame([{"Name": o["name"], "Type": _tyf.get(o["type"], o["type"]),
-                                                "obj_id": o["obj_id"]} for o in g["objects"]])
-                            st.dataframe(df, hide_index=True, use_container_width=True)
-                        if dp.get("failures"):
-                            st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
-                                     + ", ".join(f"{f.get('type')} '{f.get('name')}'" for f in dp["failures"]))
+                    _render_deps(ss.get("deps_preview"), {a["id"]: a["name"] for a in assets})
             else:
                 st.info("Click **List assets in the source org** to choose objects.")
         elif scope == "By tag":
-            tag = st.text_input("Tag", value=os.environ.get("TS_RELEASE_TAG", ""))
+            if st.button("List tags in the source org"):
+                try:
+                    ss["src_tags"] = pipeline.list_source_tags(src or None)
+                except Exception as e:
+                    ss.pop("src_tags", None)
+                    st.error(f"Couldn't list tags - {type(e).__name__}: {str(e)[:160]}")
+            tags_avail = ss.get("src_tags")
+            if tags_avail:
+                tag = st.selectbox("Tag", [""] + tags_avail, index=0) or ""
+            else:
+                tag = st.text_input("Tag", value=os.environ.get("TS_RELEASE_TAG", ""))
+                st.caption("Tip: click **List tags in the source org** to pick from what's available.")
+            if tag:
+                key = ("tag", tag)
+                if ss.get("tag_deps_key") != key:
+                    with st.spinner("Resolving tagged assets + dependencies…"):
+                        try:
+                            tagged = pipeline.list_tagged(tag, src or None)
+                            ss["tag_namemap"] = {t["id"]: t["name"] for t in tagged}
+                            ss["tag_deps"] = (pipeline.preview_dependencies([t["id"] for t in tagged], src or None)
+                                              if tagged else {"groups": [], "empty": True})
+                        except Exception as e:
+                            ss["tag_deps"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+                    ss["tag_deps_key"] = key
+                if (ss.get("tag_deps") or {}).get("empty"):
+                    st.warning(f"No objects tagged '{tag}' in the source org.")
+                else:
+                    _render_deps(ss.get("tag_deps"), ss.get("tag_namemap", {}))
         elif scope == "By collection":
             if st.button("List collections in the source org"):
                 try:
@@ -373,17 +411,19 @@ with tabs[1]:
                 collection = st.selectbox(
                     "Collection", [c["id"] for c in cols],
                     format_func=lambda i: f"{c2n.get(i, i)}  ({i[:8]})")
-                if st.button("Preview members"):
-                    try:
-                        ss["coll_preview"] = pipeline.resolve_collection(collection, src or None)
-                    except Exception as e:
-                        st.error(f"Couldn't resolve - {type(e).__name__}: {str(e)[:200]}")
-                prev = ss.get("coll_preview")
-                if prev is not None:
-                    _ty = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "LOGICAL_TABLE": "Table/Model"}
-                    st.caption(f"Resolves to **{len(prev)}** asset(s) (sub-collections flattened):")
-                    st.table([{"Name": m.get("name", ""), "Type": _ty.get(m.get("type"), m.get("type"))}
-                              for m in prev])
+                if st.button("Preview members + dependencies"):
+                    with st.spinner("Resolving collection members + dependencies…"):
+                        try:
+                            members = pipeline.resolve_collection(collection, src or None)
+                            ss["coll_namemap"] = {m["id"]: m["name"] for m in members}
+                            ss["coll_deps"] = (pipeline.preview_dependencies([m["id"] for m in members], src or None)
+                                               if members else {"groups": [], "empty": True})
+                        except Exception as e:
+                            ss["coll_deps"] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+                if (ss.get("coll_deps") or {}).get("empty"):
+                    st.warning("Collection has no promotable members.")
+                else:
+                    _render_deps(ss.get("coll_deps"), ss.get("coll_namemap", {}))
             else:
                 st.info("Click **List collections in the source org** to choose one.")
 

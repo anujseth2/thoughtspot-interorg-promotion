@@ -165,6 +165,21 @@ def preview_dependencies(object_ids, source_org=None):
     return {"groups": groups, "failures": failures}
 
 
+def list_source_tags(source_org=None):
+    """All tag names in the source org, so the operator can pick a tag instead of typing blind."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    data = ts._post("/api/rest/2.0/metadata/search", {"metadata": [{"type": "TAG"}], "record_size": -1})
+    items = data if isinstance(data, list) else data.get("metadata", [])
+    return sorted({it.get("metadata_name", "") for it in items if it.get("metadata_name")})
+
+
+def list_tagged(tag, source_org=None):
+    """[{id, name, obj_id, type}] of objects carrying `tag` in the source org (the roots a tag
+    snapshot promotes; dependencies resolve on export)."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    return ts.search_by_tag(tag, ["LOGICAL_TABLE", "LIVEBOARD", "ANSWER"])
+
+
 def resolve_collection(collection_id, source_org=None):
     """[{id, name, type}] of a collection's promotable members in the source org,
     recursing into sub-collections. For the snapshot preview."""
