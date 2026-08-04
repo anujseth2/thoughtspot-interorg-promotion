@@ -20,7 +20,7 @@ import yaml
 import config as C
 from services.ts_client import TSClient
 from services.param_transform import (load_tml, parameterize_bundle, tml_type,
-                                       retarget_connection, source_bindings)
+                                       retarget_connection, source_bindings, TABLE_TYPES)
 from services import variables as V
 from services.gh_creds import github_repo, github_token
 from services.git_repo import AreaGitRepo, LocalRepo
@@ -257,6 +257,111 @@ def _targets() -> dict:
     p = ROOT / "variables" / "targets.json"
     raw = json.loads(p.read_text()) if p.exists() else {}
     return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def _resolve_var(val, vals):
+    """`${ts_db}` -> the target's value; a literal is returned unchanged."""
+    if isinstance(val, str) and val.startswith("${") and val.endswith("}"):
+        return vals.get(val[2:-1], val)
+    return val
+
+
+def _connection_id(ts, name):
+    """GUID of a connection by name in the given org (connection_columns takes an identifier)."""
+    data = ts._post("/api/rest/2.0/metadata/search",
+                    {"metadata": [{"type": "CONNECTION"}], "record_size": -1})
+    items = data if isinstance(data, list) else data.get("metadata", [])
+    for it in items:
+        if it.get("metadata_name") == name:
+            return it.get("metadata_id")
+    return ""
+
+
+def preflight_connection(target: str) -> dict:
+    """PROACTIVELY check the target warehouse for schema parity BEFORE deploy, via the ThoughtSpot
+    connection API (no direct warehouse connection needed). For every table in the release, confirm
+    its physical columns exist in the target org's connection warehouse. Surfaces absent tables and
+    warehouse-missing columns (with ready-to-drop `table::col` tokens) so drift is caught before the
+    import fails instead of after. Needs DATAMANAGEMENT on the target connection; a table whose
+    warehouse can't be introspected (e.g. OAuth/per-user) is reported as 'unchecked', not a failure.
+    """
+    cfg = _targets().get(target)
+    if not cfg:
+        raise RuntimeError(f"target '{target}' not in variables/targets.json")
+    ts = org_client(cfg["org_id"], role="target")
+    conn_name = cfg.get("connection", "")
+    vals = cfg.get("values") or {}
+    conn_id = _connection_id(ts, conn_name) or conn_name
+    files = {k: v for k, v in git().read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
+    if not files:
+        raise RuntimeError("release/ is empty in Git — run snapshot first")
+
+    tables = [d for d in (load_tml(v) for v in files.values()) if tml_type(d) in TABLE_TYPES]
+
+    def _schema_tables(db, schema):
+        """Lowercased set of physical table names the connection exposes for db.schema, or None
+        if introspection errored. Empty set = the connection returns no objects (can't introspect)."""
+        try:
+            data = ts._post("/api/rest/2.0/connection/search", {
+                "connections": [{"identifier": conn_id,
+                                 "data_warehouse_objects": [{"database": db, "schema": schema}]}],
+                "data_warehouse_object_type": "TABLE", "record_size": -1, "record_offset": 0})
+        except Exception:
+            return None
+        conns = data if isinstance(data, list) else data.get("connections", data.get("connection", []))
+        out = set()
+        for c in conns:
+            for dbo in (c.get("data_warehouse_objects") or {}).get("databases", []) or []:
+                for sch in dbo.get("schemas", []) or []:
+                    for t in sch.get("tables", []) or []:
+                        if t.get("name"):
+                            out.add(t["name"].lower())
+        return out
+
+    # Probe introspectability first: many connections (key-pair/OAuth Snowflake, etc.) return
+    # NOTHING via the connection API. If so, don't cry wolf ("every table missing") — report the
+    # pre-check as unavailable and let Validate + the import diagnostics catch drift at import time.
+    scopes = {}
+    for d in tables:
+        o = d[tml_type(d)]
+        scopes.setdefault((_resolve_var(o.get("db"), vals), _resolve_var(o.get("schema"), vals)), None)
+    for key in list(scopes):
+        scopes[key] = _schema_tables(*key)
+    if not any(scopes.get(k) for k in scopes):       # no scope returned any object
+        return {"target": target, "connection": conn_name, "available": False, "clean": None,
+                "findings": [], "drop_tokens": [],
+                "reason": (f"The '{conn_name}' connection doesn't expose schema introspection via the "
+                           "ThoughtSpot connection API (it returned nothing). This is common for "
+                           "key-pair/OAuth Snowflake connections. Warehouse drift will still be caught "
+                           "at import time by Validate + the import diagnostics.")}
+
+    findings, drop_tokens = [], []
+    for d in tables:
+        obj = d[tml_type(d)]
+        name = obj.get("name", "?")
+        db = _resolve_var(obj.get("db"), vals)
+        schema = _resolve_var(obj.get("schema"), vals)
+        db_table = obj.get("db_table") or name
+        tml_cols = [c.get("db_column_name") for c in (obj.get("columns") or []) if c.get("db_column_name")]
+        tset = scopes.get((db, schema))
+        if tset is None:                             # this scope couldn't be introspected
+            findings.append({"table": name, "db_table": db_table, "checked": False,
+                             "missing": [], "note": "scope not introspectable"})
+            continue
+        if db_table.lower() not in tset:
+            findings.append({"table": name, "db_table": db_table, "checked": True, "table_absent": True,
+                             "missing": [], "note": f"table not found: {db}.{schema}.{db_table}"})
+            continue
+        wh = ts.connection_columns(conn_id, db, schema, db_table)
+        whl = {c.lower() for c in wh}
+        missing = [c for c in tml_cols if c.lower() not in whl]
+        drop_tokens += [f"{name}::{c}" for c in missing]
+        findings.append({"table": name, "db_table": db_table, "checked": True, "table_absent": False,
+                         "missing": missing, "note": "ok" if not missing else f"{len(missing)} missing"})
+
+    clean = all(f.get("checked") and not f.get("table_absent") and not f.get("missing") for f in findings)
+    return {"target": target, "connection": conn_name, "available": True, "clean": clean,
+            "findings": findings, "drop_tokens": sorted(set(drop_tokens))}
 
 
 def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
