@@ -62,6 +62,24 @@ def _select_set(dp, namemap, key):
                        "guid": None})
     return [r["guid"] for r in ed.to_dict("records") if r.get("Include")]
 
+
+def _refresh_snap_manifest():
+    """Re-read the release from Git into ss['snap_result'] after an obj_id rewrite."""
+    try:
+        area = pipeline.git().read_area(pipeline._release_area(), ref=pipeline._branch())
+        objs = []
+        for fn, txt in area.items():
+            if not fn.endswith(".tml"):
+                continue
+            d = pipeline.load_tml(txt)
+            t = pipeline.tml_type(d) or "object"
+            objs.append({"file": fn, "name": (d.get(t, {}) or {}).get("name", ""),
+                         "type": t, "obj_id": d.get("obj_id", "")})
+        st.session_state["snap_result"]["objects"] = objs
+        st.session_state["snap_result"]["files"] = [o["file"] for o in objs]
+    except Exception:
+        pass
+
 load_dotenv()
 
 st.set_page_config(page_title="Inter-Org Promotion", layout="wide")
@@ -519,22 +537,44 @@ with tabs[1]:
                 if st.button("Apply obj_id alignment to the release"):
                     with st.spinner("Rewriting release obj_ids…"):
                         res = pipeline.realign_release(mapping)
-                    # refresh the manifest from the rewritten release
-                    try:
-                        g = pipeline.git()
-                        area = g.read_area(pipeline._release_area(), ref=pipeline._branch())
-                        newobjs = []
-                        for fn, txt in area.items():
-                            if not fn.endswith(".tml"): continue
-                            d = pipeline.load_tml(txt); t = pipeline.tml_type(d) or "object"
-                            newobjs.append({"file": fn, "name": (d.get(t, {}) or {}).get("name", ""),
-                                            "type": t, "obj_id": d.get("obj_id", "")})
-                        ss["snap_result"]["objects"] = newobjs
-                        ss["snap_result"]["files"] = [o["file"] for o in newobjs]
-                    except Exception:
-                        pass
+                    _refresh_snap_manifest()
                     st.success(f"Aligned {len(res['changed'])} obj_id(s) in the release.")
                     st.rerun()
+
+            # ── obj_id alignment vs a target (auto-suggests which release obj_ids would duplicate) ──
+            _atargets = pipeline._targets()
+            if _atargets:
+                st.markdown("**obj_id alignment vs target** — will each object update in place, or duplicate?")
+                atgt = st.selectbox("Check against target", list(_atargets.keys()),
+                                    format_func=lambda k: _atargets[k].get("name", k), key="snap_align_tgt")
+                if st.button("Check obj_id alignment", key="snap_align_btn"):
+                    with st.spinner("Checking obj_ids against the target…"):
+                        try:
+                            ss["snap_align"] = pipeline.check_target_alignment(atgt)
+                            ss["snap_align_for"] = atgt
+                        except Exception as e:
+                            ss.pop("snap_align", None)
+                            st.error(f"Check failed - {type(e).__name__}: {str(e)[:200]}")
+                sa = ss.get("snap_align")
+                if sa and ss.get("snap_align_for") == atgt:
+                    _v = {"in_place": "✅ in place (updates)", "would_duplicate": "⚠️ WOULD DUPLICATE",
+                          "new": "🆕 new (created)"}
+                    st.dataframe(pd.DataFrame([{"Name": r["name"], "Type": _ty2.get(r["type"], r["type"]),
+                                               "source obj_id": r["obj_id"], "verdict": _v.get(r["verdict"], r["verdict"]),
+                                               "target obj_id": r["target_obj_id"]} for r in sa["rows"]]),
+                                 hide_index=True, use_container_width=True)
+                    dups = sa.get("suggest") or {}
+                    if dups:
+                        st.warning(f"{len(dups)} object(s) would DUPLICATE in the target — align the "
+                                   "release obj_id to the target's:")
+                        if st.button("Align these to the target's obj_id", key="snap_align_apply"):
+                            with st.spinner("Aligning release obj_ids…"):
+                                pipeline.realign_release(dups)
+                                ss["snap_align"] = pipeline.check_target_alignment(atgt)
+                            _refresh_snap_manifest()
+                            st.rerun()
+                    else:
+                        st.success("No duplicates — each object updates in place or is created fresh.")
         else:
             st.table([{"file": f} for f in sr["files"]])
         if sr.get("warnings"):
