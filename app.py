@@ -384,21 +384,47 @@ with tabs[1]:
                 tag = st.text_input("Tag", value=os.environ.get("TS_RELEASE_TAG", ""))
                 st.caption("Tip: click **List tags in the source org** to pick from what's available.")
             if tag:
-                key = ("tag", tag)
-                if ss.get("tag_deps_key") != key:
-                    with st.spinner("Resolving tagged assets + dependencies…"):
-                        try:
-                            tagged = pipeline.list_tagged(tag, src or None)
-                            ss["tag_namemap"] = {t["id"]: t["name"] for t in tagged}
-                            ss["tag_deps"] = (pipeline.preview_dependencies([t["id"] for t in tagged], src or None)
-                                              if tagged else {"groups": [], "empty": True})
-                        except Exception as e:
-                            ss["tag_deps"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
-                    ss["tag_deps_key"] = key
-                if (ss.get("tag_deps") or {}).get("empty"):
-                    st.warning(f"No objects tagged '{tag}' in the source org.")
+                if ss.get("tag_roots_key") != tag:                 # resolve the tag's objects once
+                    try:
+                        ss["tag_roots"] = pipeline.list_tagged(tag, src or None)
+                    except Exception as e:
+                        ss["tag_roots"] = []
+                        st.error(f"Couldn't resolve tag - {type(e).__name__}: {str(e)[:160]}")
+                    ss["tag_roots_key"] = tag
+                    ss["tag_pick"] = []                             # reset selection when tag changes
+                roots = ss.get("tag_roots", [])
+                if not roots:
+                    st.warning(f"No objects carry the tag '{tag}' in the source org.")
                 else:
-                    _render_deps(ss.get("tag_deps"), ss.get("tag_namemap", {}))
+                    _tt = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "LOGICAL_TABLE": "Table/Model"}
+                    st.caption(f"**{len(roots)}** object(s) carry '{tag}'. Select which to promote — "
+                               "you don't have to take them all; dependencies come along per pick.")
+                    rrows = [{"Name": r["name"], "Type": _tt.get(r["type"], r["type"]),
+                              "obj_id": r.get("obj_id", ""), "id": r["id"]} for r in roots]
+                    selr = st.dataframe(pd.DataFrame(rrows, columns=["Name", "Type", "obj_id", "id"]),
+                                        hide_index=True, use_container_width=True, on_select="rerun",
+                                        selection_mode="multi-row", column_config={"id": None})
+                    selr_ids = [rrows[i]["id"] for i in selr.selection.rows]
+                    b1, b2, b3 = st.columns([2, 2, 3])
+                    with b1:
+                        if st.button(f"Add {len(selr_ids)} to set", disabled=not selr_ids, key="tag_add"):
+                            ss["tag_pick"] = sorted(set(ss.get("tag_pick", [])) | set(selr_ids))
+                    with b2:
+                        if st.button("Clear set", disabled=not ss.get("tag_pick"), key="tag_clear"):
+                            ss["tag_pick"] = []
+                    object_ids = ss.get("tag_pick", [])            # tag scope promotes the SELECTED roots
+                    with b3:
+                        st.caption(f"Promotion set: **{len(object_ids)}** of {len(roots)} tagged asset(s)")
+                    if object_ids:
+                        key = tuple(sorted(object_ids))
+                        if ss.get("tag_deps_key") != key:
+                            with st.spinner("Resolving dependencies…"):
+                                try:
+                                    ss["tag_deps"] = pipeline.preview_dependencies(object_ids, src or None)
+                                except Exception as e:
+                                    ss["tag_deps"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+                            ss["tag_deps_key"] = key
+                        _render_deps(ss.get("tag_deps"), {r["id"]: r["name"] for r in roots})
         elif scope == "By collection":
             if st.button("List collections in the source org"):
                 try:
@@ -431,12 +457,16 @@ with tabs[1]:
     if st.button("Snapshot", type="primary"):
         if scope == "Pick assets" and not object_ids:
             st.warning("Add at least one asset to the set (or switch to By tag / All objects).")
+        elif scope == "By tag" and not object_ids:
+            st.warning("Select which tagged object(s) to promote (add them to the set above).")
         elif scope == "By collection" and not collection:
             st.warning("Pick a collection (or switch to another scope).")
         else:
             try:
                 with st.spinner("Parameterizing + writing release…"):
-                    ss["snap_result"] = pipeline.snapshot(source_org=src or None, tag=tag or None,
+                    # Pick assets AND By tag both drive off the selected object_ids (the chosen roots);
+                    # dependencies are pulled in on export. Collection/All use their own scope.
+                    ss["snap_result"] = pipeline.snapshot(source_org=src or None,
                                                           from_seed=from_seed, object_ids=object_ids or None,
                                                           collection=collection or None)
             except Exception as e:
