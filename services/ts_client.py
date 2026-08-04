@@ -282,14 +282,19 @@ class TSClient:
             data = self._post("/api/rest/2.0/metadata/search",
                               {"metadata": [{"type": typ}], "record_size": -1})
             items = data if isinstance(data, list) else data.get("metadata", [])
+            _MODEL_SUBTYPES = {"WORKSHEET", "AGGR_WORKSHEET", "PRIVATE_WORKSHEET"}
             for it in items:
                 hdr = it.get("metadata_header", {}) or {}
                 tags = [(t.get("name", "") if isinstance(t, dict) else str(t))
                         for t in (hdr.get("tags") or [])]
+                mt = it.get("metadata_type", "")
+                sub = hdr.get("type", "") or it.get("metadata_sub_type", "")
+                # split LOGICAL_TABLE into Model vs Table so the UI can filter them separately
+                kind = ("MODEL" if sub in _MODEL_SUBTYPES else "TABLE") if mt == "LOGICAL_TABLE" else mt
                 out.append({"id": it.get("metadata_id", ""),
                             "name": it.get("metadata_name", ""),
                             "obj_id": it.get("metadata_obj_id", ""),
-                            "type": it.get("metadata_type", ""),
+                            "type": mt, "kind": kind,
                             "tags": [t for t in tags if t]})
         return out
 
