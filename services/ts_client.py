@@ -357,8 +357,10 @@ class TSClient:
         return list(out.values())
 
     # ── Export object + its dependency chain ────────────────────────────────────
-    def export_associated(self, object_ids: List[str]):
-        """Export the given objects AND their dependencies (model, tables). Returns
+    def export_associated(self, object_ids: List[str], associated: bool = True):
+        """Export the given objects. With associated=True also pulls their dependencies (model,
+        tables); with associated=False exports EXACTLY the given objects (so the caller can promote
+        a hand-picked set, e.g. skip tables that already exist in the target). Returns
         (edocs, failures):
           edocs    - list of edoc strings for objects that exported cleanly
           failures - [{name, type, status, error}] for any object TS returned in the
@@ -371,7 +373,7 @@ class TSClient:
         masquerading as a complete one (a whole liveboard promoted without its model/tables)."""
         data = self._post("/api/rest/2.0/metadata/tml/export", {
             "metadata": [{"identifier": oid} for oid in object_ids],
-            "export_associated": True,
+            "export_associated": associated,
             "export_options": {"include_obj_id": True, "include_obj_id_ref": True},
         })
         items = data if isinstance(data, list) else data.get("object", data.get("metadata", []))
