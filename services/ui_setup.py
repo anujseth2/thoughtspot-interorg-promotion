@@ -73,7 +73,8 @@ def connect(cfg: dict):
     me = c._get("/api/rest/2.0/auth/session/user")
     myorgs = me.get("orgs") or ([me["current_org"]] if me.get("current_org") else [])
     orgs = [(str(o.get("id")), o.get("name")) for o in myorgs if o.get("id") is not None]
-    return orgs, ("" if orgs else "couldn't list your orgs - add the org IDs manually below")
+    return orgs, ("" if orgs else "couldn't list any orgs for this credential - check it has "
+                  "access to the source/target orgs")
 
 
 def list_connections(cfg: dict, org_id):
