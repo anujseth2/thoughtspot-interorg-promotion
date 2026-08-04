@@ -111,8 +111,7 @@ with tabs[0]:
             ss["orgs"] = orgs
             ss.setdefault("orgs_cfg", ui_setup.load_orgs_config())
             if note:
-                st.warning(f"Connected, but {note}. Add the org IDs manually below - promotion "
-                           "only needs membership + data rights in the orgs you use, not org-admin.")
+                st.warning(f"Connected, but {note}.")
             else:
                 st.success(f"Connected. Loaded {len(orgs)} orgs. Step 2 is unlocked below.")
         except Exception as e:
@@ -124,19 +123,9 @@ with tabs[0]:
         ss.setdefault("orgs_cfg", {})
 
         st.markdown("**Orgs in play**")
-        st.caption("These are the orgs your credential can actually reach — auto-loaded on connect "
-                   "(admins get all cluster orgs; otherwise the orgs you belong to). You can only "
-                   "promote to/from orgs your token can access, so there's normally nothing to add.")
-        # Manual add is a fallback only (e.g. a token that couldn't enumerate its orgs); tucked away
-        # so it isn't mistaken for "add any org" — a token can't reach an org it has no access to.
-        with st.expander("➕ Add an org by ID (only if it wasn't auto-loaded)"):
-            with st.form("add_org", clear_on_submit=True):
-                f1, f2 = st.columns([2, 3])
-                _mid = f1.text_input("Org ID")
-                _mname = f2.text_input("Name (optional)")
-                if st.form_submit_button("Add org") and _mid.strip():
-                    if _mid.strip() not in [i for i, _ in ss["orgs"]]:
-                        ss["orgs"].append((_mid.strip(), _mname.strip() or _mid.strip()))
+        st.caption("The orgs your credential can reach — auto-loaded on connect (admins get all "
+                   "cluster orgs; otherwise the orgs you belong to). Remove any you won't use in "
+                   "this promotion.")
         if ss["orgs"]:
             for _i, _n in list(ss["orgs"]):
                 rc1, rc2 = st.columns([8, 1])
@@ -145,7 +134,8 @@ with tabs[0]:
                     ss["orgs"] = [(x, y) for x, y in ss["orgs"] if x != _i]
                     st.rerun()
         else:
-            st.info("No orgs yet - add the source and target org IDs above.")
+            st.info("No orgs loaded — your credential couldn't enumerate any orgs. Reconnect in "
+                    "Step 1 with a credential that has access to the source/target orgs.")
 
         orgs = ss["orgs"]
         id2name = {i: n for i, n in orgs}
