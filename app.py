@@ -589,6 +589,37 @@ with tabs[3]:
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
         only = st.checkbox("Validate only (no import)", value=True)
 
+        # ── obj_id alignment check: does the source obj_id land in the target, or duplicate? ──
+        if st.button("🔗 Check obj_id alignment vs target"):
+            with st.spinner("Checking obj_ids against the target org…"):
+                try:
+                    ss["align_check"] = pipeline.check_target_alignment(tgt)
+                    ss["align_tgt"] = tgt
+                except Exception as e:
+                    ss.pop("align_check", None)
+                    st.error(f"obj_id check failed - {type(e).__name__}: {str(e)[:200]}")
+        ac = ss.get("align_check")
+        if ac and ss.get("align_tgt") == tgt:
+            _v = {"in_place": "✅ in place (updates)", "would_duplicate": "⚠️ WOULD DUPLICATE",
+                  "new": "🆕 new (created)"}
+            st.dataframe(pd.DataFrame([{"Name": r["name"], "Type": r["type"],
+                                        "source obj_id": r["obj_id"], "verdict": _v.get(r["verdict"], r["verdict"]),
+                                        "target obj_id": r["target_obj_id"]} for r in ac["rows"]]),
+                         hide_index=True, use_container_width=True)
+            dups = ac.get("suggest") or {}
+            if dups:
+                st.warning(f"{len(dups)} object(s) exist in the target under a DIFFERENT obj_id — "
+                           "importing now would create duplicates. Align them first:")
+                if st.button("Align these obj_ids in the release to the target"):
+                    with st.spinner("Aligning release obj_ids to the target…"):
+                        res = pipeline.realign_release(dups)
+                    ss.pop("snap_result", None)   # release changed; force a fresh view/re-check
+                    ss["align_check"] = pipeline.check_target_alignment(tgt)
+                    st.success(f"Aligned {len(res['changed'])} obj_id(s). Re-checked.")
+                    st.rerun()
+            else:
+                st.success("No duplicates — every object either updates in place or is created fresh.")
+
         # ── Proactive target-warehouse schema pre-check (via the TS connection API) ──
         if st.button("🔍 Pre-check target warehouse (schema parity)"):
             with st.spinner("Introspecting the target connection…"):
