@@ -350,6 +350,25 @@ def check_target_alignment(target: str) -> dict:
     return {"rows": rows, "suggest": suggest}
 
 
+def align_source_obj_ids(old_to_new: dict, source_org=None) -> dict:
+    """Change obj_ids ON THE SOURCE ORG (via update-obj-id) so source == release == target and the
+    promotion updates in place. This is the correct, persistent alignment: a release obj_id can't
+    legitimately differ from the source (the next snapshot would regenerate the source's), so we
+    re-key the source object itself. Caller re-snapshots afterwards to pick up the new obj_ids.
+    Returns {done:[(old,new)], errors:[(old,new,msg)]}. Mutates the source org."""
+    ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+    done, errors = [], []
+    for old, new in (old_to_new or {}).items():
+        if not old or not new or old == new:
+            continue
+        try:
+            ts.set_obj_id(old, new)
+            done.append((old, new))
+        except Exception as e:
+            errors.append((old, new, str(e)[:140]))
+    return {"done": done, "errors": errors}
+
+
 def realign_release(old_to_new: dict) -> dict:
     """Rewrite obj_ids IN THE RELEASE (not the source cluster) to align with the target org's
     existing objects, so deploy updates-in-place instead of creating duplicates. For each

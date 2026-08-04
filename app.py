@@ -80,6 +80,14 @@ def _refresh_snap_manifest():
     except Exception:
         pass
 
+
+def _resnapshot():
+    """Re-run the last snapshot (after source obj_ids changed) so the release picks up the new ids."""
+    si = st.session_state.get("snap_inputs") or {}
+    st.session_state["snap_result"] = pipeline.snapshot(
+        source_org=si.get("src") or None, from_seed=si.get("from_seed", False),
+        object_ids=si.get("object_ids") or None, include_dependencies=si.get("incl", True))
+
 load_dotenv()
 
 st.set_page_config(page_title="Inter-Org Promotion", layout="wide")
@@ -500,6 +508,9 @@ with tabs[1]:
                     ss["snap_result"] = pipeline.snapshot(source_org=src or None, from_seed=from_seed,
                                                           object_ids=object_ids or None,
                                                           include_dependencies=(not _needs_pick))
+                    ss["snap_inputs"] = {"src": src, "from_seed": from_seed,
+                                         "object_ids": list(object_ids or []),
+                                         "incl": (not _needs_pick)}   # to re-snapshot after obj_id changes
             except Exception as e:
                 # An incomplete export (e.g. a dependency the user can't access) aborts here
                 # instead of writing a thin release that looks complete. Show it, don't hide it.
@@ -520,8 +531,9 @@ with tabs[1]:
         objs = sr.get("objects")
         if objs:
             st.caption("Release contents — edit an **obj_id** to align it with the target org's "
-                       "existing object, so deploy updates in place instead of creating a duplicate "
-                       "(this rewrites the release only; the source cluster is not touched).")
+                       "existing object so the promotion updates in place. Applying **changes the "
+                       "obj_id on the SOURCE org** (via update-obj-id) and re-snapshots, so source, "
+                       "release and target stay consistent. ⚠️ mutates the live source object.")
             base_df = pd.DataFrame([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
                                      "obj_id": o.get("obj_id", ""), "file": o.get("file", "")} for o in objs])
             edited = st.data_editor(
@@ -533,12 +545,17 @@ with tabs[1]:
             mapping = {o["obj_id"]: nv for o, nv in zip(objs, edited["obj_id"].tolist())
                        if o.get("obj_id") and nv and nv != o["obj_id"]}
             if mapping:
-                st.caption("Pending obj_id alignment: " + ", ".join(f"`{o}` → `{n}`" for o, n in mapping.items()))
-                if st.button("Apply obj_id alignment to the release"):
-                    with st.spinner("Rewriting release obj_ids…"):
-                        res = pipeline.realign_release(mapping)
-                    _refresh_snap_manifest()
-                    st.success(f"Aligned {len(res['changed'])} obj_id(s) in the release.")
+                st.caption("Pending source obj_id changes: "
+                           + ", ".join(f"`{o}` → `{n}`" for o, n in mapping.items()))
+                if st.button("Apply to SOURCE org + re-snapshot"):
+                    with st.spinner("Renaming obj_ids on the source + re-snapshotting…"):
+                        res = pipeline.align_source_obj_ids(mapping, sr_src := ss.get("snap_inputs", {}).get("src"))
+                        if res["errors"]:
+                            st.error("Some obj_id changes failed: "
+                                     + "; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
+                        if res["done"]:
+                            _resnapshot()
+                    st.success(f"Changed {len(res['done'])} obj_id(s) on the source and re-snapshotted.")
                     st.rerun()
 
             # ── obj_id alignment vs a target (auto-suggests which release obj_ids would duplicate) ──
@@ -566,12 +583,15 @@ with tabs[1]:
                     dups = sa.get("suggest") or {}
                     if dups:
                         st.warning(f"{len(dups)} object(s) would DUPLICATE in the target — align the "
-                                   "release obj_id to the target's:")
-                        if st.button("Align these to the target's obj_id", key="snap_align_apply"):
-                            with st.spinner("Aligning release obj_ids…"):
-                                pipeline.realign_release(dups)
+                                   "SOURCE obj_id to the target's (mutates the source object):")
+                        if st.button("Align on SOURCE + re-snapshot", key="snap_align_apply"):
+                            with st.spinner("Renaming source obj_ids + re-snapshotting…"):
+                                res = pipeline.align_source_obj_ids(dups, ss.get("snap_inputs", {}).get("src"))
+                                if res["errors"]:
+                                    st.error("; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
+                                if res["done"]:
+                                    _resnapshot()
                                 ss["snap_align"] = pipeline.check_target_alignment(atgt)
-                            _refresh_snap_manifest()
                             st.rerun()
                     else:
                         st.success("No duplicates — each object updates in place or is created fresh.")
@@ -650,12 +670,15 @@ with tabs[3]:
             if dups:
                 st.warning(f"{len(dups)} object(s) exist in the target under a DIFFERENT obj_id — "
                            "importing now would create duplicates. Align them first:")
-                if st.button("Align these obj_ids in the release to the target"):
-                    with st.spinner("Aligning release obj_ids to the target…"):
-                        res = pipeline.realign_release(dups)
-                    ss.pop("snap_result", None)   # release changed; force a fresh view/re-check
-                    ss["align_check"] = pipeline.check_target_alignment(tgt)
-                    st.success(f"Aligned {len(res['changed'])} obj_id(s). Re-checked.")
+                if st.button("Align on SOURCE + re-snapshot"):
+                    with st.spinner("Renaming source obj_ids + re-snapshotting…"):
+                        res = pipeline.align_source_obj_ids(dups, ss.get("snap_inputs", {}).get("src"))
+                        if res["errors"]:
+                            st.error("; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
+                        if res["done"]:
+                            _resnapshot()
+                        ss["align_check"] = pipeline.check_target_alignment(tgt)
+                    st.success(f"Changed {len(res['done'])} source obj_id(s) and re-snapshotted.")
                     st.rerun()
             else:
                 st.success("No duplicates — every object either updates in place or is created fresh.")
