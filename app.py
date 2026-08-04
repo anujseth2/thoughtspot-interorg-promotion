@@ -395,31 +395,66 @@ with tabs[1]:
         else:
             try:
                 with st.spinner("Parameterizing + writing release…"):
-                    r = pipeline.snapshot(source_org=src or None, tag=tag or None,
-                                          from_seed=from_seed, object_ids=object_ids or None,
-                                          collection=collection or None)
+                    ss["snap_result"] = pipeline.snapshot(source_org=src or None, tag=tag or None,
+                                                          from_seed=from_seed, object_ids=object_ids or None,
+                                                          collection=collection or None)
             except Exception as e:
                 # An incomplete export (e.g. a dependency the user can't access) aborts here
                 # instead of writing a thin release that looks complete. Show it, don't hide it.
+                ss.pop("snap_result", None)
                 st.error(f"Snapshot failed - nothing was written.\n\n{e}")
-                st.stop()
-            st.success(f"Wrote {len(r['files'])} file(s) to `release/` @ `{r['sha'][:8]}`")
-            st.write("variables referenced:", r["variables"])
-            if r.get("source_bindings"):
-                st.info("Source tables were bound to (use these as the target **ts_db / ts_schema** "
-                        "unless the target differs):  "
-                        + ";   ".join(f"`{b['db']} / {b['schema']}`" for b in r["source_bindings"]))
-            _ty2 = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
-                    "table": "Table", "view": "View", "sql_view": "SQL View"}
-            if r.get("objects"):
-                st.dataframe(pd.DataFrame([{"Name": o.get("name", ""),
-                                            "Type": _ty2.get(o.get("type"), o.get("type")),
-                                            "file": o.get("file", "")} for o in r["objects"]]),
-                             hide_index=True, use_container_width=True)
-            else:
-                st.table([{"file": f} for f in r["files"]])
-            if r["warnings"]:
-                st.warning(r["warnings"])
+
+    # Render the snapshot result + obj_id alignment editor (persists across reruns)
+    sr = ss.get("snap_result")
+    if sr:
+        st.success(f"Wrote {len(sr['files'])} file(s) to `release/` @ `{sr['sha'][:8]}`")
+        st.write("variables referenced:", sr["variables"])
+        if sr.get("source_bindings"):
+            st.info("Source tables were bound to (use these as the target **ts_db / ts_schema** "
+                    "unless the target differs):  "
+                    + ";   ".join(f"`{b['db']} / {b['schema']}`" for b in sr["source_bindings"]))
+        _ty2 = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
+                "table": "Table", "view": "View", "sql_view": "SQL View"}
+        objs = sr.get("objects")
+        if objs:
+            st.caption("Release contents — edit an **obj_id** to align it with the target org's "
+                       "existing object, so deploy updates in place instead of creating a duplicate "
+                       "(this rewrites the release only; the source cluster is not touched).")
+            base_df = pd.DataFrame([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
+                                     "obj_id": o.get("obj_id", ""), "file": o.get("file", "")} for o in objs])
+            edited = st.data_editor(
+                base_df, hide_index=True, use_container_width=True, key="objid_editor",
+                column_config={"Name": st.column_config.TextColumn(disabled=True),
+                               "Type": st.column_config.TextColumn(disabled=True),
+                               "file": st.column_config.TextColumn(disabled=True),
+                               "obj_id": st.column_config.TextColumn("obj_id (editable)")})
+            mapping = {o["obj_id"]: nv for o, nv in zip(objs, edited["obj_id"].tolist())
+                       if o.get("obj_id") and nv and nv != o["obj_id"]}
+            if mapping:
+                st.caption("Pending obj_id alignment: " + ", ".join(f"`{o}` → `{n}`" for o, n in mapping.items()))
+                if st.button("Apply obj_id alignment to the release"):
+                    with st.spinner("Rewriting release obj_ids…"):
+                        res = pipeline.realign_release(mapping)
+                    # refresh the manifest from the rewritten release
+                    try:
+                        g = pipeline.git()
+                        area = g.read_area(pipeline._release_area(), ref=pipeline._branch())
+                        newobjs = []
+                        for fn, txt in area.items():
+                            if not fn.endswith(".tml"): continue
+                            d = pipeline.load_tml(txt); t = pipeline.tml_type(d) or "object"
+                            newobjs.append({"file": fn, "name": (d.get(t, {}) or {}).get("name", ""),
+                                            "type": t, "obj_id": d.get("obj_id", "")})
+                        ss["snap_result"]["objects"] = newobjs
+                        ss["snap_result"]["files"] = [o["file"] for o in newobjs]
+                    except Exception:
+                        pass
+                    st.success(f"Aligned {len(res['changed'])} obj_id(s) in the release.")
+                    st.rerun()
+        else:
+            st.table([{"file": f} for f in sr["files"]])
+        if sr.get("warnings"):
+            st.warning(sr["warnings"])
 
 # ── 2 · variables ──────────────────────────────────────────────────────────────────
 with tabs[2]:
