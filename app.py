@@ -316,24 +316,25 @@ with tabs[1]:
                     st.error(f"Couldn't list assets - {type(e).__name__}: {str(e)[:200]}")
             assets = ss.get("snap_assets", [])
             if assets:
-                _ty = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "LOGICAL_TABLE": "Table/Model"}
+                _kd = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "TABLE": "Table", "MODEL": "Model"}
+                _kind = lambda a: a.get("kind") or a.get("type", "")   # fallback for older cache
                 f1, f2 = st.columns([3, 2])
                 with f1:
                     q = st.text_input("Search by name or tag", key="asset_q",
                                       placeholder="filter the grid…")
                 with f2:
-                    types_present = sorted({a["type"] for a in assets})
+                    types_present = sorted({_kind(a) for a in assets})
                     tf = st.multiselect("Filter by type", types_present, default=types_present,
-                                        format_func=lambda t: _ty.get(t, t), key="asset_tf")
+                                        format_func=lambda t: _kd.get(t, t), key="asset_tf")
                 ql = (q or "").lower()
                 rows = []
                 for a in assets:
-                    if tf and a["type"] not in tf:
+                    if tf and _kind(a) not in tf:
                         continue
                     tags = ", ".join(a.get("tags", []) or [])
                     if ql and ql not in a.get("name", "").lower() and ql not in tags.lower():
                         continue
-                    rows.append({"Name": a.get("name", ""), "Type": _ty.get(a["type"], a["type"]),
+                    rows.append({"Name": a.get("name", ""), "Type": _kd.get(_kind(a), _kind(a)),
                                  "Tags": tags, "id": a["id"]})
                 df = pd.DataFrame(rows, columns=["Name", "Type", "Tags", "id"])
                 sel = st.dataframe(df, hide_index=True, use_container_width=True,
@@ -356,7 +357,7 @@ with tabs[1]:
                     idmap = {a["id"]: a for a in assets}
                     st.caption("**Selected:**")
                     st.table([{"Name": idmap.get(i, {}).get("name", i),
-                               "Type": _ty.get(idmap.get(i, {}).get("type", ""), "")} for i in object_ids])
+                               "Type": _kd.get(_kind(idmap.get(i, {})), "")} for i in object_ids])
                     # Auto-resolve the FULL dependency chain that will actually promote (cached per set)
                     key = tuple(sorted(object_ids))
                     if ss.get("deps_key") != key:
