@@ -124,15 +124,19 @@ with tabs[0]:
         ss.setdefault("orgs_cfg", {})
 
         st.markdown("**Orgs in play**")
-        st.caption("Every org you'll use - the source and each target. Org-admins get these "
-                   "auto-loaded on connect; otherwise add them by ID (Admin > Orgs, or ask your admin).")
-        with st.form("add_org", clear_on_submit=True):
-            f1, f2 = st.columns([2, 3])
-            _mid = f1.text_input("Org ID")
-            _mname = f2.text_input("Name (optional)")
-            if st.form_submit_button("Add org") and _mid.strip():
-                if _mid.strip() not in [i for i, _ in ss["orgs"]]:
-                    ss["orgs"].append((_mid.strip(), _mname.strip() or _mid.strip()))
+        st.caption("These are the orgs your credential can actually reach — auto-loaded on connect "
+                   "(admins get all cluster orgs; otherwise the orgs you belong to). You can only "
+                   "promote to/from orgs your token can access, so there's normally nothing to add.")
+        # Manual add is a fallback only (e.g. a token that couldn't enumerate its orgs); tucked away
+        # so it isn't mistaken for "add any org" — a token can't reach an org it has no access to.
+        with st.expander("➕ Add an org by ID (only if it wasn't auto-loaded)"):
+            with st.form("add_org", clear_on_submit=True):
+                f1, f2 = st.columns([2, 3])
+                _mid = f1.text_input("Org ID")
+                _mname = f2.text_input("Name (optional)")
+                if st.form_submit_button("Add org") and _mid.strip():
+                    if _mid.strip() not in [i for i, _ in ss["orgs"]]:
+                        ss["orgs"].append((_mid.strip(), _mname.strip() or _mid.strip()))
         if ss["orgs"]:
             for _i, _n in list(ss["orgs"]):
                 rc1, rc2 = st.columns([8, 1])
@@ -332,8 +336,28 @@ with tabs[1]:
                     st.caption(f"Promotion set: **{len(object_ids)}** asset(s)  ·  showing {len(rows)} of {len(assets)}")
                 if object_ids:
                     idmap = {a["id"]: a for a in assets}
+                    st.caption("**Selected:**")
                     st.table([{"Name": idmap.get(i, {}).get("name", i),
                                "Type": _ty.get(idmap.get(i, {}).get("type", ""), "")} for i in object_ids])
+                    # Auto-resolve the FULL dependency chain that will actually promote (cached per set)
+                    key = tuple(sorted(object_ids))
+                    if ss.get("deps_key") != key:
+                        with st.spinner("Resolving dependencies…"):
+                            try:
+                                ss["deps_preview"] = pipeline.preview_dependencies(object_ids, src or None)
+                            except Exception as e:
+                                ss["deps_preview"] = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+                        ss["deps_key"] = key
+                    dp = ss.get("deps_preview") or {}
+                    if dp.get("error"):
+                        st.warning(f"Couldn't resolve dependencies - {dp['error']}")
+                    elif dp.get("objects"):
+                        st.caption(f"**Will promote {len(dp['objects'])} object(s)** (selected + resolved dependencies):")
+                        st.table([{"Name": o["name"], "Type": _ty.get(o["type"], o["type"]), "obj_id": o["obj_id"]}
+                                  for o in dp["objects"]])
+                        if dp.get("failures"):
+                            st.error(f"{len(dp['failures'])} object(s) can't be exported (access): "
+                                     + ", ".join(f"{f.get('type')} '{f.get('name')}'" for f in dp["failures"]))
             else:
                 st.info("Click **List assets in the source org** to choose objects.")
         elif scope == "By tag":
@@ -387,7 +411,13 @@ with tabs[1]:
                 st.info("Source tables were bound to (use these as the target **ts_db / ts_schema** "
                         "unless the target differs):  "
                         + ";   ".join(f"`{b['db']} / {b['schema']}`" for b in r["source_bindings"]))
-            st.table([{"file": f} for f in r["files"]])
+            _ty2 = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
+                    "table": "Table", "view": "View", "sql_view": "SQL View"}
+            if r.get("objects"):
+                st.table([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
+                           "file": o.get("file", "")} for o in r["objects"]])
+            else:
+                st.table([{"file": f} for f in r["files"]])
             if r["warnings"]:
                 st.warning(r["warnings"])
 
