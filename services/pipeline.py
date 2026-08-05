@@ -557,9 +557,17 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
     ts = org_client(cfg["org_id"], role="target")   # uses TS_TOKEN_TARGET when set (bearer case)
-    files = {k: v for k, v in git().read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
+    g = git()
+    files = {k: v for k, v in g.read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
+    if not files and _branch() and _branch() != g.main:
+        # GitHub mode: snapshot commits to the release branch and opens a PR into the base branch.
+        # Once that PR is MERGED, GitHub auto-deletes the release branch, so reading it comes back
+        # empty — but the merged release now lives on the base branch. Read it there so the intended
+        # flow (snapshot -> PR -> approve -> merge -> deploy) works, not only deploy-before-merge.
+        files = {k: v for k, v in g.read_area(_release_area(), ref=g.main).items() if k.endswith(".tml")}
     if not files:
-        raise RuntimeError("release/ is empty in Git — run snapshot first")
+        raise RuntimeError("release/ is empty in Git — run snapshot first (or the release PR was "
+                           "merged and the base branch has no release/ — check the repo)")
     docs = [load_tml(v) for v in files.values()]
     dropped = None
     if drop_cols:                                    # remove warehouse-missing columns + dependents
