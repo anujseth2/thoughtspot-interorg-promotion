@@ -21,6 +21,24 @@ from services import nl_instructions, feedback_replace
 _TYF = {"liveboard": "Liveboard", "answer": "Answer", "model": "Model", "worksheet": "Model",
         "table": "Table", "view": "View", "sql_view": "SQL View"}
 
+# ThoughtSpot system/Usage-Analytics content can't be exported (the snapshot aborts on it) and
+# always exists in the target, so it must never enter a promotion set. Detected by AUTHOR:
+# authorName == "system" is the reliable signal (verified on-cluster over 400 objects) — customer
+# content never has it, while name matching both over- and under-matches (a user object named
+# "TS: ..." vs a system object named "How users are searching answers"). The name set is only a
+# belt-and-suspenders for the known blockers in case author is ever missing.
+_SYSTEM_NAMES = {"User Adoption", "Object Usage", "Credit Usage", "Billable Query Stats",
+                 "Performance Tracking", "Provisioned Users", "ATLAS_NODE_COUNT",
+                 "Credits Purchased", "TS BI: Server", "TS: BI Server"}
+
+
+def _is_system(asset: dict) -> bool:
+    """True for TS system content, by author (authorName == 'system'), with the known
+    unexportable names as a fallback. Takes the asset dict from list_source_assets."""
+    if (asset.get("author") or "").strip().lower() == "system":
+        return True
+    return (asset.get("name") or "").strip() in _SYSTEM_NAMES
+
 
 def _select_set(dp, namemap, key, src=None):
     """Selectable resolved-set editor used by every scope (Pick assets / By tag / By collection).
@@ -50,8 +68,9 @@ def _select_set(dp, namemap, key, src=None):
     if not flat:
         return []
     st.caption(f"**{len(flat)} object(s) resolved** — untick any you don't want to promote (e.g. a "
-               "table that already exists in the target; it resolves there by obj_id). Note: dropping "
-               "a model/table that a kept object needs will fail on import unless the target has it.")
+               "table that already exists in the target; it resolves there by obj_id). You can **edit "
+               "the obj_id** cell to set the source's obj_id, then apply it below. Note: dropping a "
+               "model/table that a kept object needs will fail on import unless the target has it.")
     rows = [{"Include": True, "Name": v["Name"], "Type": v["Type"], "obj_id": v["obj_id"],
              "Used by": ", ".join(sorted(v["_used"])), "guid": v["guid"]} for v in flat.values()]
     ed = st.data_editor(
@@ -59,10 +78,40 @@ def _select_set(dp, namemap, key, src=None):
         column_config={"Include": st.column_config.CheckboxColumn("Include"),
                        "Name": st.column_config.TextColumn(disabled=True),
                        "Type": st.column_config.TextColumn(disabled=True),
-                       "obj_id": st.column_config.TextColumn(disabled=True),
+                       "obj_id": st.column_config.TextColumn(
+                           "obj_id", help="Edit to rename this object's obj_id on the SOURCE org, "
+                           "then click Apply below."),
                        "Used by": st.column_config.TextColumn(disabled=True),
                        "guid": None})
-    kept = [r["guid"] for r in ed.to_dict("records") if r.get("Include")]
+    recs = ed.to_dict("records")
+    kept = [r["guid"] for r in recs if r.get("Include")]
+    # detect edited obj_ids (grid value vs what's actually on the source) → offer to write to SOURCE
+    edits = {}
+    for r in recs:
+        g = r["guid"]
+        old = flat.get(g, {}).get("obj_id", "")
+        new = (r.get("obj_id") or "").strip()
+        if new and old and new != old:
+            edits[old] = new
+    if edits:
+        st.warning(f"{len(edits)} obj_id edit(s) pending: "
+                   + "; ".join(f"`{o}` → `{n}`" for o, n in edits.items()))
+        if st.button("Apply obj_id edits to SOURCE org", key=f"{key}_edit_apply", type="primary"):
+            with st.spinner("Rewriting obj_ids on the source org…"):
+                try:
+                    res = pipeline.align_source_obj_ids(edits, src)
+                    if res.get("errors"):
+                        st.error("Some rewrites failed: " + "; ".join(res["errors"]))
+                    if res.get("done"):
+                        st.success(f"Renamed {len(res['done'])} obj_id(s) on the source org. "
+                                   "Re-resolve (change and restore the selection, or re-run the scope) "
+                                   "to see the new values, then Snapshot.")
+                        # drop cached resolution so the next render re-reads the new obj_ids
+                        for ck in ("deps_key", "tag_deps_key", "deps_preview", "tag_deps", "coll_deps"):
+                            ss = st.session_state
+                            ss.pop(ck, None)
+                except Exception as e:
+                    st.error(f"Apply failed: {e}")
     sel_objs = [{"name": flat[g]["Name"], "type": flat[g]["rawtype"], "obj_id": flat[g]["obj_id"]}
                 for g in kept if g in flat]
     _align_section(sel_objs, key, src)
@@ -410,7 +459,10 @@ with tabs[1]:
                 except Exception as e:
                     ss.pop("snap_assets", None)
                     st.error(f"Couldn't list assets - {type(e).__name__}: {str(e)[:200]}")
-            assets = ss.get("snap_assets", [])
+            # TS system content (authorName == "system") never appears in the picker: it can't be
+            # exported and always exists in the target, so it would only block the snapshot.
+            _sys_ids = {a["id"] for a in ss.get("snap_assets", []) if _is_system(a)}
+            assets = [a for a in ss.get("snap_assets", []) if a["id"] not in _sys_ids]
             if assets:
                 _kd = {"LIVEBOARD": "Liveboard", "ANSWER": "Answer", "TABLE": "Table", "MODEL": "Model"}
                 _kind = lambda a: a.get("kind") or a.get("type", "")   # fallback for older cache
@@ -437,17 +489,26 @@ with tabs[1]:
                                    on_select="rerun", selection_mode="multi-row",
                                    column_config={"id": None})  # click headers to sort
                 sel_ids = [rows[i]["id"] for i in sel.selection.rows] if rows else []
-                a1, a2, a3 = st.columns([2, 2, 3])
+                a1, a2, a3, a4 = st.columns([2, 2, 2, 3])
                 with a1:
                     if st.button(f"Add {len(sel_ids)} to set", disabled=not sel_ids):
                         s = set(ss.get("asset_pick", []))
                         s.update(sel_ids)
                         ss["asset_pick"] = list(s)
                 with a2:
+                    # symmetric with Add: select rows already in the set, then Remove them
+                    if st.button(f"Remove {len(sel_ids)} from set", disabled=not sel_ids):
+                        ss["asset_pick"] = [i for i in ss.get("asset_pick", []) if i not in set(sel_ids)]
+                with a3:
                     if st.button("Clear set", disabled=not ss.get("asset_pick")):
                         ss["asset_pick"] = []
+                # defensively drop any system asset that slipped into the set (e.g. a stale pick
+                # from before this filter) — they can't export and would block the snapshot.
+                _picked = [i for i in ss.get("asset_pick", []) if i not in _sys_ids]
+                if len(_picked) != len(ss.get("asset_pick", [])):
+                    ss["asset_pick"] = _picked
                 root_ids = ss.get("asset_pick", [])
-                with a3:
+                with a4:
                     st.caption(f"Picked roots: **{len(root_ids)}**  ·  showing {len(rows)} of {len(assets)}")
                 object_ids = []
                 if root_ids:

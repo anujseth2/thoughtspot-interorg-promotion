@@ -295,6 +295,10 @@ class TSClient:
                             "name": it.get("metadata_name", ""),
                             "obj_id": it.get("metadata_obj_id", ""),
                             "type": mt, "kind": kind,
+                            # authorName == "system" is the reliable signal for TS system /
+                            # Usage-Analytics content (verified on-cluster): customer content
+                            # never has it. Lets the UI drop unexportable system objects.
+                            "author": hdr.get("authorName", ""),
                             "tags": [t for t in tags if t]})
         return out
 
