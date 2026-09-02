@@ -189,12 +189,16 @@ def resolve_collection(collection_id, source_org=None):
 
 
 def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
-             collection=None, include_dependencies=True) -> dict:
+             collection=None, include_dependencies=True, progress=None) -> dict:
+    _p = progress if callable(progress) else (lambda *_a: None)   # phase reporter (no-op if None)
     g = git()
     if from_seed:
+        _p("Loading bundled seed…")
         docs = [load_tml(p.read_text()) for p in sorted((ROOT / "seed").glob("*.tml"))]
     else:
-        ts = org_client(source_org or os.environ.get("TS_ORG_SOURCE", "0"))
+        _src = source_org or os.environ.get("TS_ORG_SOURCE", "0")
+        _p(f"Connecting to source org {_src}…")
+        ts = org_client(_src)
         types = ["LOGICAL_TABLE", "LIVEBOARD", "ANSWER"]
         if object_ids:                             # explicit asset selection
             ids = list(object_ids)
@@ -216,6 +220,8 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
             ids = [f["id"] for f in found]
         # include_dependencies=False -> export EXACTLY `ids` (a hand-picked set); the operator has
         # confirmed anything omitted already exists in the target and resolves there by obj_id.
+        _p(f"Exporting {len(ids)} object(s) from ThoughtSpot"
+           + (" + dependencies" if include_dependencies else "") + " (large models can be slow)…")
         edocs, failures = ts.export_associated(ids, associated=include_dependencies)
         if failures:
             # Do NOT silently drop objects TS couldn't export - a missing dependency (e.g. a
@@ -230,8 +236,10 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
         if not edocs:
             raise RuntimeError("Export returned no objects - nothing to snapshot "
                                "(check the selection and the connecting user's access).")
+        _p(f"Exported {len(edocs)} object(s).")
         docs = [load_tml(e) for e in edocs]
 
+    _p("Parameterizing release…")
     bindings = source_bindings(docs)               # real db/schema, read before parameterizing
     out, used, warns = parameterize_bundle(docs)
     files = {}
@@ -248,8 +256,10 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     release = _release_area()                       # resolve subfolder at call time
     # On a release branch, reset from main each snapshot for a clean single commit + PR;
     # branch=None commits straight to main (unprotected repos / local mode), as before.
+    _p(f"Committing {len(files)} file(s) to git ({branch or g.main})…")
     sha = g.commit_area(release, files, message="snapshot parameterized release",
                         branch=branch, reset_from=(g.main if branch else None))
+    _p("Writing variable manifest…")
     g.put_file(_manifest_path(), json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
     # ADDITIVE by design: a snapshot adds/updates the files it produces and leaves every OTHER
@@ -259,11 +269,13 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     # Removing an object from a release is a deliberate act, not a side effect of promoting a subset.)
     pr_url = None
     if branch:                                  # open (or reuse) a PR into main for review/merge
+        _p("Opening pull request…")
         try:
             pr_url = g.open_pr(branch, "ThoughtSpot inter-org release",
                                f"Parameterized `release/` snapshot. Review and merge to record it on `{g.main}`.")
         except Exception as e:
             warns.append(f"committed to '{branch}', but no PR opened: {str(e)[:140]}")
+    _p("Done.")
     return {"files": list(files), "objects": objects, "variables": sorted(used), "warnings": warns,
             "sha": sha, "pruned": [], "branch": branch, "pr_url": pr_url,
             "source_bindings": [{"db": d, "schema": s} for d, s in bindings]}

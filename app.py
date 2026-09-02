@@ -616,13 +616,15 @@ with tabs[1]:
             st.warning("Select the objects to promote in the table above (tick the ones you want).")
         else:
             try:
-                with st.spinner("Parameterizing + writing release…"):
+                with st.status("Snapshotting…", expanded=True) as _snap_status:
                     # Pick assets / By tag / By collection all resolve to a hand-picked set of guids
                     # in `object_ids`; export EXACTLY those (include_dependencies=False) so unticked
                     # objects are omitted. "All objects in the org" leaves object_ids empty -> full org.
                     ss["snap_result"] = pipeline.snapshot(source_org=src or None, from_seed=from_seed,
                                                           object_ids=object_ids or None,
-                                                          include_dependencies=(not _needs_pick))
+                                                          include_dependencies=(not _needs_pick),
+                                                          progress=lambda m: _snap_status.write(m))
+                    _snap_status.update(label="Snapshot complete", state="complete")
                     ss["snap_inputs"] = {"src": src, "from_seed": from_seed,
                                          "object_ids": list(object_ids or []),
                                          "incl": (not _needs_pick)}   # to re-snapshot after obj_id changes

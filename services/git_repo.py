@@ -28,6 +28,12 @@ class AreaGitRepo:
         kwargs = {"verify": verify}
         if base_url:
             kwargs["base_url"] = base_url.rstrip("/")
+        # Bound each HTTP call so a stalled GitHub request (corporate proxy, huge monorepo,
+        # rate-limit backoff) fails loudly instead of hanging the whole snapshot forever.
+        try:
+            kwargs["timeout"] = int(os.environ.get("GIT_HTTP_TIMEOUT", "45"))
+        except ValueError:
+            kwargs["timeout"] = 45
         self._gh = Github(token, **kwargs)
         self._repo = self._gh.get_repo(repo_name)
         self.main = main_branch
