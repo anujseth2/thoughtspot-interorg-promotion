@@ -252,9 +252,11 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
                         branch=branch, reset_from=(g.main if branch else None))
     g.put_file(_manifest_path(), json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
-    # prune stale files left by a previous (different) snapshot, so a release fully replaces
-    pruned = [fn for fn in list(g.read_area(release, ref=branch)) if fn.endswith(".tml") and fn not in files
-              and g.delete_file(f"{release}/{fn}", "chore: drop stale release file", branch=branch)]
+    # ADDITIVE by design: a snapshot adds/updates the files it produces and leaves every OTHER
+    # module's release files untouched. (We used to prune files not in this snapshot for a "full
+    # replace" - but that deletes other modules when you promote a subset, e.g. snapshotting only
+    # Bureau wiped Claims/Underwriting. The GSK tool has always been additive; this matches it.
+    # Removing an object from a release is a deliberate act, not a side effect of promoting a subset.)
     pr_url = None
     if branch:                                  # open (or reuse) a PR into main for review/merge
         try:
@@ -263,7 +265,7 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
         except Exception as e:
             warns.append(f"committed to '{branch}', but no PR opened: {str(e)[:140]}")
     return {"files": list(files), "objects": objects, "variables": sorted(used), "warnings": warns,
-            "sha": sha, "pruned": pruned, "branch": branch, "pr_url": pr_url,
+            "sha": sha, "pruned": [], "branch": branch, "pr_url": pr_url,
             "source_bindings": [{"db": d, "schema": s} for d, s in bindings]}
 
 
