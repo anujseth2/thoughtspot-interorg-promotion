@@ -737,38 +737,6 @@ with tabs[3]:
         # obj_id alignment lives in ONE place - the selection view before Snapshot. At deploy time the
         # release obj_ids are already set; VALIDATE_ONLY below still guards the import.
 
-        # ── Proactive target-warehouse schema pre-check (via the TS connection API) ──
-        if st.button("🔍 Pre-check target warehouse (schema parity)"):
-            with st.spinner("Introspecting the target connection…"):
-                try:
-                    ss["preflight"] = pipeline.preflight_connection(tgt)
-                    ss["preflight_tgt"] = tgt
-                except Exception as e:
-                    ss.pop("preflight", None)
-                    st.error(f"Pre-check failed - {type(e).__name__}: {str(e)[:200]}")
-        pf = ss.get("preflight")
-        if pf and ss.get("preflight_tgt") == tgt:
-            if pf.get("available") is False:
-                st.info("🔍 Pre-check unavailable — " + pf.get("reason", ""))
-            elif pf["clean"]:
-                st.success(f"Target-warehouse parity OK — every release table + column exists in "
-                           f"`{pf['connection']}`. Safe to deploy.")
-            else:
-                st.warning("Target-warehouse gaps found (add them to the warehouse, or drop + deploy):")
-                st.table([{"table": f["table"], "db_table": f.get("db_table"),
-                           "status": ("ABSENT" if f.get("table_absent") else
-                                      "unchecked" if not f.get("checked") else
-                                      f"missing {len(f['missing'])}" if f.get("missing") else "ok"),
-                           "missing_columns": ", ".join(f.get("missing") or []),
-                           "note": f.get("note", "")} for f in pf["findings"]])
-                if pf["drop_tokens"]:
-                    if st.button("Drop those columns + dependent vizzes and deploy"):
-                        with st.spinner("Deploying without the missing columns…"):
-                            ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only,
-                                                                  drop_cols=pf["drop_tokens"])
-                        ss["deploy_tgt"] = tgt
-                        st.rerun()
-
         if st.button(f"{'Validate' if only else 'Deploy'} → {tgt}", type="primary"):
             with st.spinner("Validating + deploying…"):
                 ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only)
