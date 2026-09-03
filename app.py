@@ -672,71 +672,14 @@ with tabs[1]:
                 "table": "Table", "view": "View", "sql_view": "SQL View"}
         objs = sr.get("objects")
         if objs:
-            st.caption("Release contents — edit an **obj_id** to align it with the target org's "
-                       "existing object so the promotion updates in place. Applying **changes the "
-                       "obj_id on the SOURCE org** (via update-obj-id) and re-snapshots, so source, "
-                       "release and target stay consistent. ⚠️ mutates the live source object.")
-            base_df = pd.DataFrame([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
-                                     "obj_id": o.get("obj_id", ""), "file": o.get("file", "")} for o in objs])
-            edited = st.data_editor(
-                base_df, hide_index=True, use_container_width=True, key="objid_editor",
-                column_config={"Name": st.column_config.TextColumn(disabled=True),
-                               "Type": st.column_config.TextColumn(disabled=True),
-                               "file": st.column_config.TextColumn(disabled=True),
-                               "obj_id": st.column_config.TextColumn("obj_id (editable)")})
-            mapping = {o["obj_id"]: nv for o, nv in zip(objs, edited["obj_id"].tolist())
-                       if o.get("obj_id") and nv and nv != o["obj_id"]}
-            if mapping:
-                st.caption("Pending source obj_id changes: "
-                           + ", ".join(f"`{o}` → `{n}`" for o, n in mapping.items()))
-                if st.button("Apply to SOURCE org + re-snapshot"):
-                    with st.spinner("Renaming obj_ids on the source + re-snapshotting…"):
-                        res = pipeline.align_source_obj_ids(mapping, sr_src := ss.get("snap_inputs", {}).get("src"))
-                        if res["errors"]:
-                            st.error("Some obj_id changes failed: "
-                                     + "; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
-                        if res["done"]:
-                            _resnapshot()
-                    st.success(f"Changed {len(res['done'])} obj_id(s) on the source and re-snapshotted.")
-                    st.rerun()
-
-            # ── obj_id alignment vs a target (auto-suggests which release obj_ids would duplicate) ──
-            _atargets = pipeline._targets()
-            if _atargets:
-                st.markdown("**obj_id alignment vs target** — will each object update in place, or duplicate?")
-                atgt = st.selectbox("Check against target", list(_atargets.keys()),
-                                    format_func=lambda k: _atargets[k].get("name", k), key="snap_align_tgt")
-                if st.button("Check obj_id alignment", key="snap_align_btn"):
-                    with st.spinner("Checking obj_ids against the target…"):
-                        try:
-                            ss["snap_align"] = pipeline.check_target_alignment(atgt)
-                            ss["snap_align_for"] = atgt
-                        except Exception as e:
-                            ss.pop("snap_align", None)
-                            st.error(f"Check failed - {type(e).__name__}: {str(e)[:200]}")
-                sa = ss.get("snap_align")
-                if sa and ss.get("snap_align_for") == atgt:
-                    _v = {"in_place": "✅ in place (updates)", "would_duplicate": "⚠️ WOULD DUPLICATE",
-                          "new": "🆕 new (created)"}
-                    st.dataframe(pd.DataFrame([{"Name": r["name"], "Type": _ty2.get(r["type"], r["type"]),
-                                               "source obj_id": r["obj_id"], "verdict": _v.get(r["verdict"], r["verdict"]),
-                                               "target obj_id": r["target_obj_id"]} for r in sa["rows"]]),
-                                 hide_index=True, use_container_width=True)
-                    dups = sa.get("suggest") or {}
-                    if dups:
-                        st.warning(f"{len(dups)} object(s) would DUPLICATE in the target — align the "
-                                   "SOURCE obj_id to the target's (mutates the source object):")
-                        if st.button("Align on SOURCE + re-snapshot", key="snap_align_apply"):
-                            with st.spinner("Renaming source obj_ids + re-snapshotting…"):
-                                res = pipeline.align_source_obj_ids(dups, ss.get("snap_inputs", {}).get("src"))
-                                if res["errors"]:
-                                    st.error("; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
-                                if res["done"]:
-                                    _resnapshot()
-                                ss["snap_align"] = pipeline.check_target_alignment(atgt)
-                            st.rerun()
-                    else:
-                        st.success("No duplicates — each object updates in place or is created fresh.")
+            # Summary only: show what's in the release, obj_id included. The obj_id ALIGNMENT check
+            # (and any source obj_id rewrite) lives in ONE place - the selection view, before Snapshot.
+            st.caption("Release contents. **obj_id** is the cross-org identity: it decides whether a "
+                       "promotion updates the matching object in place or creates a new one. To align "
+                       "obj_ids, use *obj_id alignment vs target* on the selection view before snapshot.")
+            st.dataframe(pd.DataFrame([{"Name": o.get("name", ""), "Type": _ty2.get(o.get("type"), o.get("type")),
+                                        "obj_id": o.get("obj_id", ""), "file": o.get("file", "")} for o in objs]),
+                         hide_index=True, use_container_width=True)
         else:
             st.table([{"file": f} for f in sr["files"]])
         if sr.get("warnings"):
@@ -791,39 +734,8 @@ with tabs[3]:
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
         only = st.checkbox("Validate only (no import)", value=True)
 
-        # ── obj_id alignment check: does the source obj_id land in the target, or duplicate? ──
-        if st.button("🔗 Check obj_id alignment vs target"):
-            with st.spinner("Checking obj_ids against the target org…"):
-                try:
-                    ss["align_check"] = pipeline.check_target_alignment(tgt)
-                    ss["align_tgt"] = tgt
-                except Exception as e:
-                    ss.pop("align_check", None)
-                    st.error(f"obj_id check failed - {type(e).__name__}: {str(e)[:200]}")
-        ac = ss.get("align_check")
-        if ac and ss.get("align_tgt") == tgt:
-            _v = {"in_place": "✅ in place (updates)", "would_duplicate": "⚠️ WOULD DUPLICATE",
-                  "new": "🆕 new (created)"}
-            st.dataframe(pd.DataFrame([{"Name": r["name"], "Type": r["type"],
-                                        "source obj_id": r["obj_id"], "verdict": _v.get(r["verdict"], r["verdict"]),
-                                        "target obj_id": r["target_obj_id"]} for r in ac["rows"]]),
-                         hide_index=True, use_container_width=True)
-            dups = ac.get("suggest") or {}
-            if dups:
-                st.warning(f"{len(dups)} object(s) exist in the target under a DIFFERENT obj_id — "
-                           "importing now would create duplicates. Align them first:")
-                if st.button("Align on SOURCE + re-snapshot"):
-                    with st.spinner("Renaming source obj_ids + re-snapshotting…"):
-                        res = pipeline.align_source_obj_ids(dups, ss.get("snap_inputs", {}).get("src"))
-                        if res["errors"]:
-                            st.error("; ".join(f"{o}->{n}: {m}" for o, n, m in res["errors"]))
-                        if res["done"]:
-                            _resnapshot()
-                        ss["align_check"] = pipeline.check_target_alignment(tgt)
-                    st.success(f"Changed {len(res['done'])} source obj_id(s) and re-snapshotted.")
-                    st.rerun()
-            else:
-                st.success("No duplicates — every object either updates in place or is created fresh.")
+        # obj_id alignment lives in ONE place - the selection view before Snapshot. At deploy time the
+        # release obj_ids are already set; VALIDATE_ONLY below still guards the import.
 
         # ── Proactive target-warehouse schema pre-check (via the TS connection API) ──
         if st.button("🔍 Pre-check target warehouse (schema parity)"):
