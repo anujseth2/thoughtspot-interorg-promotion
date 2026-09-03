@@ -13,6 +13,8 @@ Variables are managed from the Primary org (TS_ORG_PRIMARY, default 0).
 import json
 import os
 import re
+import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -98,15 +100,27 @@ def org_client(org, role: str = "source") -> TSClient:
     return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **_auth(role))
 
 
+def _log(msg: str) -> None:
+    """Timestamped server-side trace (-> stderr / streamlit.log) so a stall or failure inside
+    snapshot() is visible even when the UI status box can't render it (e.g. a hang that happens
+    before the first progress callback, or a swallowed error)."""
+    print(f"[snapshot {time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
+
+
 def git():
     """GIT_LOCAL_DIR set -> read/write the release in that local folder (any git clone;
     you push/PR yourself). Otherwise commit to the GitHub repo over the API."""
     local = os.environ.get("GIT_LOCAL_DIR")
     if local:
+        _log(f"git store = local folder {local}")
         return LocalRepo(local)
     base = os.environ.get("GIT_BASE_BRANCH", "main").strip() or "main"
-    return AreaGitRepo(github_token(), github_repo(), main_branch=base,
-                       verify=_verify(), base_url=os.environ.get("GITHUB_API_URL", "").strip())
+    repo = github_repo()   # raises a clear RuntimeError (caught + shown by the UI) if unset
+    _log(f"connecting to GitHub repo {repo} (api={os.environ.get('GITHUB_API_URL') or 'github.com'})…")
+    r = AreaGitRepo(github_token(), repo, main_branch=base,
+                    verify=_verify(), base_url=os.environ.get("GITHUB_API_URL", "").strip())
+    _log("GitHub repo handle acquired.")
+    return r
 
 
 def _branch():
@@ -190,8 +204,16 @@ def resolve_collection(collection_id, source_org=None):
 
 def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
              collection=None, include_dependencies=True, progress=None) -> dict:
-    _p = progress if callable(progress) else (lambda *_a: None)   # phase reporter (no-op if None)
+    def _p(msg):                                   # report a phase: server log + optional UI callback
+        _log(msg)
+        if callable(progress):
+            try:
+                progress(msg)
+            except Exception:
+                pass
+    _p("Preparing git store…")                     # fires BEFORE git(): a git-connect stall stops here
     g = git()
+    _p("Git store ready.")
     if from_seed:
         _p("Loading bundled seed…")
         docs = [load_tml(p.read_text()) for p in sorted((ROOT / "seed").glob("*.tml"))]
