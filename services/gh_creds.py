@@ -20,7 +20,9 @@ _MIGRATION_ENV = ROOT.parent / "ts-git-migration-poc" / ".env"
 def github_repo() -> str:
     repo = os.environ.get("GITHUB_REPO")
     if not repo:
-        raise SystemExit("GITHUB_REPO not set in .env (e.g. anujseth2/ts-area-promo)")
+        raise RuntimeError("No GitHub repo configured. In Setup, under 'Where releases are stored', "
+                           "set a GitHub repo + token or choose a local folder, then click "
+                           "'Save configuration' and retry.")
     return repo
 
 
@@ -30,7 +32,8 @@ def github_token() -> str:
         load_dotenv(_MIGRATION_ENV)             # pull token from the migration POC
         token = os.environ.get("GITHUB_TOKEN")
     if not token:
-        raise SystemExit("GITHUB_TOKEN not found (set it in .env or ts-git-migration-poc/.env)")
+        raise RuntimeError("No GitHub token configured. In Setup, set the GitHub token alongside the "
+                           "repo and click 'Save configuration' (or use a local folder store instead).")
     return token
 
 

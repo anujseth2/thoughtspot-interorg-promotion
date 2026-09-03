@@ -126,19 +126,27 @@ def _align_section(objects, key, src=None):
     tg = pipeline._targets()
     if not tg or not objects:
         return
-    with st.expander(f"🔗 obj_id alignment vs target ({len(objects)} object(s) selected)", expanded=False):
+    _open = f"{key}_aopen"                              # keep this panel open across reruns
+    with st.expander(f"🔗 obj_id alignment vs target ({len(objects)} object(s) selected)",
+                     expanded=st.session_state.get(_open, False)):   # collapse-on-click was the bug
         st.caption("Does each selected object's obj_id already exist in the target? If a same-named "
                    "object exists under a DIFFERENT obj_id, promoting would create a duplicate — align "
                    "the source's obj_id to the target's first.")
         atgt = st.selectbox("Target to check against", list(tg),
                             format_func=lambda k: tg[k].get("name", k), key=f"{key}_atgt")
         if st.button("Check obj_id alignment", key=f"{key}_abtn"):
+            st.session_state[_open] = True             # stay open when the rerun re-renders the expander
             with st.spinner("Checking obj_ids in target…"):
                 try:
                     st.session_state[f"{key}_ares"] = pipeline.check_alignment_objects(objects, atgt)
                     st.session_state[f"{key}_afor"] = atgt
+                    st.session_state.pop(f"{key}_aerr", None)
                 except Exception as e:
-                    st.error(f"Alignment check failed: {e}")
+                    st.session_state.pop(f"{key}_ares", None)
+                    st.session_state[f"{key}_aerr"] = str(e)
+            st.rerun()                                 # re-render expanded, with the result/error shown
+        if st.session_state.get(f"{key}_aerr"):
+            st.error(f"Alignment check failed: {st.session_state[f'{key}_aerr']}")
         ar = st.session_state.get(f"{key}_ares")
         if ar and st.session_state.get(f"{key}_afor") == atgt:
             _vlabel = {"in_place": "✅ in place", "would_duplicate": "⚠️ would DUPLICATE", "new": "🆕 new"}
@@ -316,7 +324,11 @@ with tabs[0]:
 
         # ── Git store ──
         st.markdown("**Git store**")
-        gitmode = st.radio("Where to store the release", ["Local folder", "GitHub repo"], horizontal=True)
+        # Default the radio to the mode that's actually configured, so opening Setup never silently
+        # flips a GitHub-configured store onto an empty "Local folder" (a Save would then wipe it).
+        _gm_idx = 1 if (os.environ.get("GITHUB_REPO") and not os.environ.get("GIT_LOCAL_DIR")) else 0
+        gitmode = st.radio("Where to store the release", ["Local folder", "GitHub repo"],
+                           horizontal=True, index=_gm_idx)
         if gitmode == "Local folder":
             ss["git_local_dir"] = st.text_input("Local folder path (any folder, e.g. inside a git clone - no GitHub token needed)",
                                                 value=ss.get("git_local_dir", "") or os.environ.get("GIT_LOCAL_DIR", ""))
@@ -415,12 +427,19 @@ with tabs[0]:
 
         st.divider()
         if st.button("Save configuration", type="primary"):
-            try:
-                p1, p2 = ui_setup.write_config(_cfg(), new_cfg)
-                st.success(f"Saved and live for this session (also written to {p1} and {p2}). "
-                           "Use the Snapshot / Variables / Deploy tabs now.")
-            except Exception as e:
-                st.error(f"Save failed - {str(e)[:300]}")
+            _c = _cfg()
+            if not (_c.get("git_local_dir") or _c.get("github_repo")):
+                # Guard: never persist a config with no git store - that silently wiped the store
+                # before and left Snapshot with nowhere to write.
+                st.error("Choose a git store before saving: enter a **local folder path**, or switch to "
+                         "**GitHub repo** and enter the repo (+ token), under *Git store* above.")
+            else:
+                try:
+                    p1, p2 = ui_setup.write_config(_c, new_cfg)
+                    st.success(f"Saved and live for this session (also written to {p1} and {p2}). "
+                               "Use the Snapshot / Variables / Deploy tabs now.")
+                except Exception as e:
+                    st.error(f"Save failed - {str(e)[:300]}")
     else:
         st.info("Enter host + default auth, then click **Test connection & load orgs**.")
 
@@ -614,6 +633,10 @@ with tabs[1]:
         _needs_pick = scope in ("Pick assets", "By tag", "By collection")
         if _needs_pick and not object_ids:
             st.warning("Select the objects to promote in the table above (tick the ones you want).")
+        elif not (os.environ.get("GIT_LOCAL_DIR") or os.environ.get("GITHUB_REPO")):
+            st.error("No git store is configured, so there is nowhere to write the release. In **Setup**, "
+                     "under *Where releases are stored*, choose a **GitHub repo + token** or a **local "
+                     "folder**, click **Save configuration**, then retry Snapshot.")
         else:
             try:
                 with st.status("Snapshotting…", expanded=True) as _snap_status:
@@ -628,9 +651,11 @@ with tabs[1]:
                     ss["snap_inputs"] = {"src": src, "from_seed": from_seed,
                                          "object_ids": list(object_ids or []),
                                          "incl": (not _needs_pick)}   # to re-snapshot after obj_id changes
-            except Exception as e:
-                # An incomplete export (e.g. a dependency the user can't access) aborts here
-                # instead of writing a thin release that looks complete. Show it, don't hide it.
+            except (Exception, SystemExit) as e:
+                # An incomplete export (a dependency the user can't access) or a config error
+                # (no git store / token) aborts here instead of writing a thin release or, worse,
+                # leaving the status box spinning forever. Show it, don't hide it. SystemExit is
+                # caught explicitly because some helpers raise it and it bypasses `except Exception`.
                 ss.pop("snap_result", None)
                 st.error(f"Snapshot failed - nothing was written.\n\n{e}")
 
