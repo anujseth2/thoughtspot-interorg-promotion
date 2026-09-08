@@ -723,9 +723,9 @@ with tabs[2]:
 # ── 3 · deploy ─────────────────────────────────────────────────────────────────────
 with tabs[3]:
     st.subheader("Deploy release to a target org")
-    st.write("The release folder keeps everything ever promoted; a per-target **ledger** tracks what "
-             "has actually been deployed, so you only work with what's pending. Pick the assets, "
-             "validate them, then deploy the confirmed set atomically (all or none). Never deletes.")
+    st.write("The release folder keeps everything ever promoted. Each asset is checked **live against "
+             "the target** by obj_id, so you can see what would be created vs updated in place. Pick "
+             "the assets, validate, then deploy the confirmed set atomically (all or none). Never deletes.")
     targets = pipeline._targets()
     if not targets:
         st.warning("No targets configured - add them in the Setup tab.")
@@ -734,8 +734,8 @@ with tabs[3]:
         tgt = st.selectbox("Target", list(targets.keys()),
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
 
-        # Pending list = release assets classified against THIS target's deploy ledger. Computed on
-        # target change or an explicit refresh (not every rerun), so GitHub-mode stays responsive.
+        # Release assets classified LIVE against THIS target (obj_id lookup per object). Computed on
+        # target change or an explicit refresh, not every rerun, since it queries the cluster.
         if st.button("↻ Refresh pending") or ss.get("pending_tgt") != tgt:
             try:
                 ss["pending"] = pipeline.pending_for_target(tgt)
@@ -746,22 +746,28 @@ with tabs[3]:
                 ss["pending"] = []
                 ss["pending_err"] = str(e)
         if ss.get("pending_err"):
-            st.error(f"Couldn't read the release/ledger - {ss['pending_err']}")
+            st.error(f"Couldn't check the release against the target - {ss['pending_err']}")
         pending = ss.get("pending", []) if ss.get("pending_tgt") == tgt else []
 
-        _badge = {"new": "🆕 new", "changed": "♻️ changed", "deployed": "✅ deployed"}
+        _badge = {"new": "🆕 new", "in_place": "✅ in target", "would_duplicate": "⚠️ would DUPLICATE"}
         _tf = {"table": "Table", "view": "View", "sql_view": "SQL View", "model": "Model",
                "worksheet": "Model", "answer": "Answer", "liveboard": "Liveboard"}
         selected = []
         if not pending:
             st.info("Nothing in `release/` yet — run a snapshot first.")
         else:
-            n_pending = sum(1 for r in pending if r["status"] in ("new", "changed"))
-            st.caption(f"{n_pending} asset(s) promoted but not yet deployed to "
-                       f"**{targets[tgt].get('name', tgt)}** (of {len(pending)} in the release). New and "
-                       "changed are ticked by default; already-deployed are not. Untick anything the "
-                       "target can't take yet (e.g. a module whose warehouse tables aren't built).")
-            grid = pd.DataFrame([{"Include": r["status"] in ("new", "changed"),
+            n_new = sum(1 for r in pending if r["status"] == "new")
+            n_dup = sum(1 for r in pending if r["status"] == "would_duplicate")
+            st.caption(f"{n_new} asset(s) not yet in **{targets[tgt].get('name', tgt)}** "
+                       f"(of {len(pending)} in the release), checked live by obj_id. Only those are ticked "
+                       "by default; assets already in the target are not (re-tick one to push an update). "
+                       "Untick anything the target can't take yet (e.g. a module whose warehouse tables "
+                       "aren't built).")
+            if n_dup:
+                st.warning(f"{n_dup} asset(s) exist in the target under a DIFFERENT obj_id - importing "
+                           "would create duplicates. Align the obj_id on the selection view before "
+                           "snapshotting, rather than deploying these as-is.")
+            grid = pd.DataFrame([{"Include": r["status"] == "new",
                                   "Name": r["name"], "Type": _tf.get(r["type"], r["type"]),
                                   "status": _badge.get(r["status"], r["status"]),
                                   "last promoted": (r.get("updated") or "—").replace("T", " "),
@@ -779,11 +785,11 @@ with tabs[3]:
                                "file": st.column_config.TextColumn(disabled=True)})
             selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]
             # Auto-include each ticked asset's in-release dependencies (a liveboard pulls its model
-            # + tables) so the imported set is self-contained - but skip deps already deployed to
-            # this target, since they're satisfied there and re-importing them is redundant.
-            _deployed = {r["file"] for r in pending if r["status"] == "deployed"}
+            # + tables) so the imported set is self-contained - but skip deps the target already has,
+            # since they're satisfied there and re-importing them is redundant.
+            _in_target = {r["file"] for r in pending if r["status"] == "in_place"}
             expanded = (pipeline.expand_with_dependencies(selected, release=ss.get("release_files"),
-                                                          already_deployed=_deployed)
+                                                          already_in_target=_in_target)
                         if selected else [])
             _added = [f for f in expanded if f not in selected]
             if _added:
@@ -804,7 +810,7 @@ with tabs[3]:
                 ss["deploy_tgt"] = tgt
                 ss["deploy_files"] = expanded
                 if not ss["deploy_result"].get("blocked"):
-                    ss.pop("pending_tgt", None)       # deployed -> recompute pending (ledger moved)
+                    ss.pop("pending_tgt", None)       # deployed -> re-check against the target
 
         with st.expander("Advanced: deploy the entire release folder (legacy whole-folder path)"):
             _wf_only = st.checkbox("Validate only (no import)", value=True, key="wf_only")

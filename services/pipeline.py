@@ -10,7 +10,6 @@ Verbs (one shared engine for the CLI):
 
 Variables are managed from the Primary org (TS_ORG_PRIMARY, default 0).
 """
-import hashlib
 import json
 import os
 import re
@@ -42,25 +41,6 @@ def _release_area() -> str:
 def _manifest_path() -> str:
     b = _base()
     return f"{b}/variables/manifest.json" if b else "variables/manifest.json"
-
-def _ledger_path(target: str) -> str:
-    """Per-target deploy ledger in Git. Records which release files (+ content hash) have been
-    imported into this target, so a later session can tell what is promoted-but-not-deployed."""
-    b = _base()
-    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", target).strip("_") or "target"
-    return f"{b}/variables/deploys/{safe}.json" if b else f"variables/deploys/{safe}.json"
-
-def _content_hash(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-
-def _ledger_branch():
-    """Branch the deploy ledger is written to in GitHub mode. A DEDICATED branch (never merged into
-    the base), so the ledger commit works whether or not the base branch is protected - a protected
-    base blocks direct pushes to itself, not commits to a side branch. None in local-folder mode
-    (branches don't apply; the ledger is just a file the operator commits with the release)."""
-    if os.environ.get("GIT_LOCAL_DIR"):
-        return None
-    return (os.environ.get("GIT_LEDGER_BRANCH") or "ts-deploy-ledger").strip() or "ts-deploy-ledger"
 
 def _read_release_files() -> dict:
     """{filename: yaml} for every .tml in release/. Reads the release branch, then falls back to the
@@ -378,10 +358,9 @@ def check_target_alignment(target: str) -> dict:
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
     ts = org_client(cfg["org_id"], role="target")
-    area = {fn: txt for fn, txt in git().read_area(_release_area(), ref=_branch()).items()
-            if fn.endswith(".tml")}
+    area = _read_release_files()                 # release branch, then base once the PR is merged
     rows, suggest = [], {}
-    for txt in area.values():
+    for fn, txt in area.items():
         d = load_tml(txt)
         t = tml_type(d) or "object"
         name = (d.get(t, {}) or {}).get("name", "")
@@ -397,7 +376,8 @@ def check_target_alignment(target: str) -> dict:
         except Exception:
             has_oid = False
         if has_oid:
-            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "in_place", "target_obj_id": oid})
+            rows.append({"file": fn, "name": name, "type": t, "obj_id": oid,
+                         "verdict": "in_place", "target_obj_id": oid})
             continue
         tobj = ""
         try:
@@ -407,10 +387,12 @@ def check_target_alignment(target: str) -> dict:
         except Exception:
             tobj = ""
         if tobj and tobj != oid:
-            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "would_duplicate", "target_obj_id": tobj})
+            rows.append({"file": fn, "name": name, "type": t, "obj_id": oid,
+                         "verdict": "would_duplicate", "target_obj_id": tobj})
             suggest[oid] = tobj
         else:
-            rows.append({"name": name, "type": t, "obj_id": oid, "verdict": "new", "target_obj_id": ""})
+            rows.append({"file": fn, "name": name, "type": t, "obj_id": oid,
+                         "verdict": "new", "target_obj_id": ""})
     return {"rows": rows, "suggest": suggest}
 
 
@@ -603,63 +585,29 @@ def preflight_connection(target: str) -> dict:
             "findings": findings, "drop_tokens": sorted(set(drop_tokens))}
 
 
-def read_ledger(target: str) -> dict:
-    """This target's deploy record from Git: {'files': {filename: content_hash}, 'sha', 'at'}.
-    Empty dict if the target was never deployed. Read from the dedicated ledger branch (GitHub
-    mode) or the local folder."""
-    g = git()
-    raw = g.read_file(_ledger_path(target), ref=_ledger_branch() or g.main)
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return {}
-
-
-def _update_ledger(target: str, deployed_files: dict) -> None:
-    """After a successful atomic import, record the deployed release files (filename -> content
-    hash) in the target's ledger, MERGED with prior entries. Written to a DEDICATED ledger branch
-    (created off the base if absent) so the record survives across sessions AND the commit works
-    whether or not the base branch is protected. In local-folder mode it's just a file on disk."""
-    g = git()
-    files = dict((read_ledger(target).get("files") or {}))
-    for fn, text in deployed_files.items():
-        files[fn] = _content_hash(text)
-    payload = {"target": target, "files": files,
-               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    lb = _ledger_branch()
-    if lb:
-        g.ensure_branch(lb)                          # side branch; unaffected by base protection
-    g.put_file(_ledger_path(target), json.dumps(payload, indent=2),
-               f"chore: deploy ledger for {target}", branch=lb)
-
-
 def pending_for_target(target: str) -> list:
-    """Classify every release/ asset against the target's deploy ledger so the UI can show what is
-    promoted-but-not-deployed:
-        new      = never deployed to this target
-        changed  = deployed before, but the release content differs (re-promoted since)
-        deployed = deployed and unchanged
-    Returns [{file, name, type, obj_id, status}], sorted by filename."""
-    files = _read_release_files()
-    ledger = (read_ledger(target).get("files") or {})
+    """Classify every release/ asset against the TARGET org, read LIVE from the cluster (no stored
+    deploy state). Per asset:
+        new             = the target has no object with this obj_id -> created on import
+        in_place        = the target already has it -> import updates it in place
+        would_duplicate = the target has the same NAME under a DIFFERENT obj_id -> importing now
+                          would create a duplicate; align the obj_id first
+    Each row also carries when the tool last promoted (wrote/committed) that file.
+    Returns [{file, name, type, obj_id, status, target_obj_id, updated}], sorted by filename."""
+    align = check_target_alignment(target)
     g = git()                                   # one handle, reused for every file's commit time
     area, ref = _release_area(), (_branch() or g.main)
     rows = []
-    for fn, text in sorted(files.items()):
-        d = load_tml(text)
-        typ = tml_type(d) or "object"
-        o = d.get(typ, {}) or {}
-        old = ledger.get(fn)
-        status = "new" if old is None else ("deployed" if old == _content_hash(text) else "changed")
+    for r in align.get("rows", []):
+        fn = r.get("file", "")
         try:
-            updated = g.last_updated(f"{area}/{fn}", ref=ref)   # last promoted/committed time
+            updated = g.last_updated(f"{area}/{fn}", ref=ref) if fn else None
         except Exception:
             updated = None
-        rows.append({"file": fn, "name": o.get("name", fn), "type": typ,
-                     "obj_id": d.get("obj_id", ""), "status": status, "updated": updated})
-    return rows
+        rows.append({"file": fn, "name": r.get("name", fn), "type": r.get("type", "object"),
+                     "obj_id": r.get("obj_id", ""), "status": r.get("verdict", "new"),
+                     "target_obj_id": r.get("target_obj_id", ""), "updated": updated})
+    return sorted(rows, key=lambda x: x["file"])
 
 
 def _referenced_obj_ids(node, out: set) -> None:
@@ -677,17 +625,17 @@ def _referenced_obj_ids(node, out: set) -> None:
             _referenced_obj_ids(x, out)
 
 
-def expand_with_dependencies(selected_files, release=None, already_deployed=None) -> list:
+def expand_with_dependencies(selected_files, release=None, already_in_target=None) -> list:
     """Grow a set of selected release filenames to its in-release dependency closure, so picking a
     liveboard automatically pulls its model + tables (and their deps) that already sit in the
     release. Follows obj_id references file-to-file; a ref with no matching release file (e.g. a
-    connection remapped by name) is skipped. Dependencies in `already_deployed` are NOT auto-added
-    (they're already present in the target, so re-importing them is redundant) - but a file the
-    caller EXPLICITLY selected is always kept, even if already deployed. Returns the sorted list."""
+    connection remapped by name) is skipped. Dependencies in `already_in_target` are NOT auto-added
+    (the target already has them, so re-importing is redundant) - but a file the caller EXPLICITLY
+    selected is always kept, even if the target already has it. Returns the sorted list."""
     files = release if release is not None else _read_release_files()
     docs = {fn: load_tml(text) for fn, text in files.items()}
     objid_to_file = {d.get("obj_id"): fn for fn, d in docs.items() if d.get("obj_id")}
-    skip = set(already_deployed or ())
+    skip = set(already_in_target or ())
     result = {f for f in selected_files if f in files}      # explicit picks kept as-is
     queue = list(result)
     while queue:
@@ -695,7 +643,7 @@ def expand_with_dependencies(selected_files, release=None, already_deployed=None
         _referenced_obj_ids(docs[queue.pop()], refs)
         for oid in refs:
             dep = objid_to_file.get(oid)
-            if dep and dep not in result and dep not in skip:   # don't re-add a satisfied dep
+            if dep and dep not in result and dep not in skip:   # target already has it
                 result.add(dep)
                 queue.append(dep)
     return sorted(result)
@@ -713,8 +661,7 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None, files=None)
     raw TS errors into reviewer-actionable causes/fixes. `drop_cols` (['table::col', ...]) lets
     the caller re-deploy with warehouse-missing columns (+ their dependent vizs) removed, for
     when the target warehouse lags the source. `files` (list of release filenames) scopes the
-    deploy to a selected subset (the pending-list pick); None deploys the whole release/. A
-    successful atomic import records the deployed files in the target's ledger (read_ledger).
+    deploy to a selected subset (the pending-list pick); None deploys the whole release/.
     """
     from services.import_diagnostics import classify_import_errors, drop_columns as _drop_columns
     cfg = _targets().get(target)
@@ -761,7 +708,6 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None, files=None)
                 "findings": classify_import_errors(validate) if errs else [],
                 "imported": None, "blocked": bool(errs), "dropped": dropped}
     results = ts.import_tml(strings, policy="ALL_OR_NONE")
-    _update_ledger(target, use_files)                # record what actually deployed (per-target)
     return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
             "findings": [], "imported": results, "blocked": False, "dropped": dropped}
 
