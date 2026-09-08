@@ -723,8 +723,9 @@ with tabs[2]:
 # ── 3 · deploy ─────────────────────────────────────────────────────────────────────
 with tabs[3]:
     st.subheader("Deploy release to a target org")
-    st.write("Reads `release/`, remaps the connection to the target org's, imports "
-             "(tables first). VALIDATE_ONLY runs first and blocks the import if it fails. Never deletes.")
+    st.write("The release folder keeps everything ever promoted; a per-target **ledger** tracks what "
+             "has actually been deployed, so you only work with what's pending. Pick the assets, "
+             "validate them, then deploy the confirmed set atomically (all or none). Never deletes.")
     targets = pipeline._targets()
     if not targets:
         st.warning("No targets configured - add them in the Setup tab.")
@@ -732,15 +733,71 @@ with tabs[3]:
         ss = st.session_state
         tgt = st.selectbox("Target", list(targets.keys()),
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
-        only = st.checkbox("Validate only (no import)", value=True)
 
-        # obj_id alignment lives in ONE place - the selection view before Snapshot. At deploy time the
-        # release obj_ids are already set; VALIDATE_ONLY below still guards the import.
+        # Pending list = release assets classified against THIS target's deploy ledger. Computed on
+        # target change or an explicit refresh (not every rerun), so GitHub-mode stays responsive.
+        if st.button("↻ Refresh pending") or ss.get("pending_tgt") != tgt:
+            try:
+                ss["pending"] = pipeline.pending_for_target(tgt)
+                ss["pending_tgt"] = tgt
+                ss.pop("pending_err", None)
+            except Exception as e:
+                ss["pending"] = []
+                ss["pending_err"] = str(e)
+        if ss.get("pending_err"):
+            st.error(f"Couldn't read the release/ledger - {ss['pending_err']}")
+        pending = ss.get("pending", []) if ss.get("pending_tgt") == tgt else []
 
-        if st.button(f"{'Validate' if only else 'Deploy'} → {tgt}", type="primary"):
-            with st.spinner("Validating + deploying…"):
-                ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only)
-            ss["deploy_tgt"] = tgt
+        _badge = {"new": "🆕 new", "changed": "♻️ changed", "deployed": "✅ deployed"}
+        _tf = {"table": "Table", "view": "View", "sql_view": "SQL View", "model": "Model",
+               "worksheet": "Model", "answer": "Answer", "liveboard": "Liveboard"}
+        selected = []
+        if not pending:
+            st.info("Nothing in `release/` yet — run a snapshot first.")
+        else:
+            n_pending = sum(1 for r in pending if r["status"] in ("new", "changed"))
+            st.caption(f"{n_pending} asset(s) promoted but not yet deployed to "
+                       f"**{targets[tgt].get('name', tgt)}** (of {len(pending)} in the release). New and "
+                       "changed are ticked by default; already-deployed are not. Untick anything the "
+                       "target can't take yet (e.g. a module whose warehouse tables aren't built).")
+            grid = pd.DataFrame([{"Include": r["status"] in ("new", "changed"),
+                                  "Name": r["name"], "Type": _tf.get(r["type"], r["type"]),
+                                  "status": _badge.get(r["status"], r["status"]),
+                                  "obj_id": r["obj_id"], "file": r["file"]} for r in pending])
+            edited = st.data_editor(
+                grid, hide_index=True, use_container_width=True, key=f"pending_editor_{tgt}",
+                column_config={"Include": st.column_config.CheckboxColumn("Include"),
+                               "Name": st.column_config.TextColumn(disabled=True),
+                               "Type": st.column_config.TextColumn(disabled=True),
+                               "status": st.column_config.TextColumn("status", disabled=True),
+                               "obj_id": st.column_config.TextColumn(disabled=True),
+                               "file": st.column_config.TextColumn(disabled=True)})
+            selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]
+
+            c1, c2 = st.columns(2)
+            if c1.button(f"Validate selection ({len(selected)})", disabled=not selected):
+                with st.spinner("Validating the selected set against the target…"):
+                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=True, files=selected)
+                ss["deploy_tgt"] = tgt
+                ss["deploy_files"] = selected
+            if c2.button(f"Deploy selection ({len(selected)}) — atomic", type="primary",
+                         disabled=not selected):
+                with st.spinner("Validating + importing the selected set (all or none)…"):
+                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=False, files=selected)
+                ss["deploy_tgt"] = tgt
+                ss["deploy_files"] = selected
+                if not ss["deploy_result"].get("blocked"):
+                    ss.pop("pending_tgt", None)       # deployed -> recompute pending (ledger moved)
+
+        with st.expander("Advanced: deploy the entire release folder (legacy whole-folder path)"):
+            _wf_only = st.checkbox("Validate only (no import)", value=True, key="wf_only")
+            if st.button(f"{'Validate' if _wf_only else 'Deploy'} entire folder → {tgt}"):
+                with st.spinner("Validating + deploying the whole release/…"):
+                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=_wf_only)
+                ss["deploy_tgt"] = tgt
+                ss["deploy_files"] = None
+                if not _wf_only and not ss["deploy_result"].get("blocked"):
+                    ss.pop("pending_tgt", None)
 
         r = ss.get("deploy_result")
         if r and ss.get("deploy_tgt") == tgt:
@@ -766,11 +823,19 @@ with tabs[3]:
                                + ", ".join(dropcols))
                     if st.button("Drop those columns + dependent vizzes and re-deploy"):
                         with st.spinner("Re-deploying without the missing columns…"):
-                            ss["deploy_result"] = pipeline.deploy(tgt, validate_only=only, drop_cols=dropcols)
+                            ss["deploy_result"] = pipeline.deploy(
+                                tgt, validate_only=False, drop_cols=dropcols,
+                                files=ss.get("deploy_files"))
+                        if not ss["deploy_result"].get("blocked"):
+                            ss.pop("pending_tgt", None)
                         st.rerun()
 
             if r.get("blocked"):
-                st.error("Validate failed - nothing imported (see above).")
+                st.error("Validate failed - nothing imported. Untick the flagged asset(s) above, or "
+                         "build their tables in the target warehouse, then retry.")
+            elif r.get("imported") is None:
+                st.success("Validation passed. Use **Deploy selection** to import the confirmed set "
+                           "atomically.")
             elif r.get("imported"):
                 st.write("**Import:**")
                 st.table([{"status": v["status"], "type": v["type"], "name": v["name"],
