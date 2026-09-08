@@ -739,6 +739,7 @@ with tabs[3]:
         if st.button("↻ Refresh pending") or ss.get("pending_tgt") != tgt:
             try:
                 ss["pending"] = pipeline.pending_for_target(tgt)
+                ss["release_files"] = pipeline._read_release_files()   # cached for dep expansion
                 ss["pending_tgt"] = tgt
                 ss.pop("pending_err", None)
             except Exception as e:
@@ -777,19 +778,28 @@ with tabs[3]:
                                "obj_id": st.column_config.TextColumn(disabled=True),
                                "file": st.column_config.TextColumn(disabled=True)})
             selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]
+            # Auto-include each ticked asset's in-release dependencies (a liveboard pulls its model
+            # + tables) so the imported set is self-contained.
+            expanded = (pipeline.expand_with_dependencies(selected, release=ss.get("release_files"))
+                        if selected else [])
+            _added = [f for f in expanded if f not in selected]
+            if _added:
+                _nm = {r["file"]: r["name"] for r in pending}
+                st.caption(f"➕ Auto-including {len(_added)} dependency file(s) from the release: "
+                           + ", ".join(_nm.get(f, f) for f in _added))
 
             c1, c2 = st.columns(2)
-            if c1.button(f"Validate selection ({len(selected)})", disabled=not selected):
-                with st.spinner("Validating the selected set against the target…"):
-                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=True, files=selected)
+            if c1.button(f"Validate selection ({len(expanded)})", disabled=not expanded):
+                with st.spinner("Validating the selected set + dependencies against the target…"):
+                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=True, files=expanded)
                 ss["deploy_tgt"] = tgt
-                ss["deploy_files"] = selected
-            if c2.button(f"Deploy selection ({len(selected)}) — atomic", type="primary",
-                         disabled=not selected):
-                with st.spinner("Validating + importing the selected set (all or none)…"):
-                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=False, files=selected)
+                ss["deploy_files"] = expanded
+            if c2.button(f"Deploy selection ({len(expanded)}) — atomic", type="primary",
+                         disabled=not expanded):
+                with st.spinner("Validating + importing the selected set + dependencies (all or none)…"):
+                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=False, files=expanded)
                 ss["deploy_tgt"] = tgt
-                ss["deploy_files"] = selected
+                ss["deploy_files"] = expanded
                 if not ss["deploy_result"].get("blocked"):
                     ss.pop("pending_tgt", None)       # deployed -> recompute pending (ledger moved)
 
