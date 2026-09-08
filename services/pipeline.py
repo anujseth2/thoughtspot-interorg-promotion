@@ -53,6 +53,15 @@ def _ledger_path(target: str) -> str:
 def _content_hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
+def _ledger_branch():
+    """Branch the deploy ledger is written to in GitHub mode. A DEDICATED branch (never merged into
+    the base), so the ledger commit works whether or not the base branch is protected - a protected
+    base blocks direct pushes to itself, not commits to a side branch. None in local-folder mode
+    (branches don't apply; the ledger is just a file the operator commits with the release)."""
+    if os.environ.get("GIT_LOCAL_DIR"):
+        return None
+    return (os.environ.get("GIT_LEDGER_BRANCH") or "ts-deploy-ledger").strip() or "ts-deploy-ledger"
+
 def _read_release_files() -> dict:
     """{filename: yaml} for every .tml in release/. Reads the release branch, then falls back to the
     base branch (GitHub mode after the release PR is merged and the branch is auto-deleted)."""
@@ -596,9 +605,10 @@ def preflight_connection(target: str) -> dict:
 
 def read_ledger(target: str) -> dict:
     """This target's deploy record from Git: {'files': {filename: content_hash}, 'sha', 'at'}.
-    Empty dict if the target was never deployed. The ledger lives on the base branch."""
+    Empty dict if the target was never deployed. Read from the dedicated ledger branch (GitHub
+    mode) or the local folder."""
     g = git()
-    raw = g.read_file(_ledger_path(target), ref=g.main)
+    raw = g.read_file(_ledger_path(target), ref=_ledger_branch() or g.main)
     if not raw:
         return {}
     try:
@@ -609,16 +619,20 @@ def read_ledger(target: str) -> dict:
 
 def _update_ledger(target: str, deployed_files: dict) -> None:
     """After a successful atomic import, record the deployed release files (filename -> content
-    hash) in the target's ledger, MERGED with prior entries. Written to the base branch so the
-    record survives across sessions and the snapshot -> PR -> merge -> deploy flow."""
+    hash) in the target's ledger, MERGED with prior entries. Written to a DEDICATED ledger branch
+    (created off the base if absent) so the record survives across sessions AND the commit works
+    whether or not the base branch is protected. In local-folder mode it's just a file on disk."""
     g = git()
     files = dict((read_ledger(target).get("files") or {}))
     for fn, text in deployed_files.items():
         files[fn] = _content_hash(text)
     payload = {"target": target, "files": files,
                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    lb = _ledger_branch()
+    if lb:
+        g.ensure_branch(lb)                          # side branch; unaffected by base protection
     g.put_file(_ledger_path(target), json.dumps(payload, indent=2),
-               f"chore: deploy ledger for {target}")
+               f"chore: deploy ledger for {target}", branch=lb)
 
 
 def pending_for_target(target: str) -> list:
