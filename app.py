@@ -779,8 +779,11 @@ with tabs[3]:
                                "file": st.column_config.TextColumn(disabled=True)})
             selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]
             # Auto-include each ticked asset's in-release dependencies (a liveboard pulls its model
-            # + tables) so the imported set is self-contained.
-            expanded = (pipeline.expand_with_dependencies(selected, release=ss.get("release_files"))
+            # + tables) so the imported set is self-contained - but skip deps already deployed to
+            # this target, since they're satisfied there and re-importing them is redundant.
+            _deployed = {r["file"] for r in pending if r["status"] == "deployed"}
+            expanded = (pipeline.expand_with_dependencies(selected, release=ss.get("release_files"),
+                                                          already_deployed=_deployed)
                         if selected else [])
             _added = [f for f in expanded if f not in selected]
             if _added:
