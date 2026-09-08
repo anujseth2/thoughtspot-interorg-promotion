@@ -677,22 +677,25 @@ def _referenced_obj_ids(node, out: set) -> None:
             _referenced_obj_ids(x, out)
 
 
-def expand_with_dependencies(selected_files, release=None) -> list:
-    """Grow a set of selected release filenames to its full in-release dependency closure, so
-    picking a liveboard automatically pulls its model + tables (and their deps) that already sit
-    in the release. Follows obj_id references file-to-file; a ref with no matching release file
-    (e.g. a connection remapped by name) is simply skipped. Returns the sorted expanded list."""
+def expand_with_dependencies(selected_files, release=None, already_deployed=None) -> list:
+    """Grow a set of selected release filenames to its in-release dependency closure, so picking a
+    liveboard automatically pulls its model + tables (and their deps) that already sit in the
+    release. Follows obj_id references file-to-file; a ref with no matching release file (e.g. a
+    connection remapped by name) is skipped. Dependencies in `already_deployed` are NOT auto-added
+    (they're already present in the target, so re-importing them is redundant) - but a file the
+    caller EXPLICITLY selected is always kept, even if already deployed. Returns the sorted list."""
     files = release if release is not None else _read_release_files()
     docs = {fn: load_tml(text) for fn, text in files.items()}
     objid_to_file = {d.get("obj_id"): fn for fn, d in docs.items() if d.get("obj_id")}
-    result = {f for f in selected_files if f in files}
+    skip = set(already_deployed or ())
+    result = {f for f in selected_files if f in files}      # explicit picks kept as-is
     queue = list(result)
     while queue:
         refs = set()
         _referenced_obj_ids(docs[queue.pop()], refs)
         for oid in refs:
             dep = objid_to_file.get(oid)
-            if dep and dep not in result:
+            if dep and dep not in result and dep not in skip:   # don't re-add a satisfied dep
                 result.add(dep)
                 queue.append(dep)
     return sorted(result)
