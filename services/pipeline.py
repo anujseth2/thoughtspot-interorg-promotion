@@ -10,6 +10,7 @@ Verbs (one shared engine for the CLI):
 
 Variables are managed from the Primary org (TS_ORG_PRIMARY, default 0).
 """
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,25 @@ def _release_area() -> str:
 def _manifest_path() -> str:
     b = _base()
     return f"{b}/variables/manifest.json" if b else "variables/manifest.json"
+
+def _ledger_path(target: str) -> str:
+    """Per-target deploy ledger in Git. Records which release files (+ content hash) have been
+    imported into this target, so a later session can tell what is promoted-but-not-deployed."""
+    b = _base()
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", target).strip("_") or "target"
+    return f"{b}/variables/deploys/{safe}.json" if b else f"variables/deploys/{safe}.json"
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+def _read_release_files() -> dict:
+    """{filename: yaml} for every .tml in release/. Reads the release branch, then falls back to the
+    base branch (GitHub mode after the release PR is merged and the branch is auto-deleted)."""
+    g = git()
+    files = {k: v for k, v in g.read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
+    if not files and _branch() and _branch() != g.main:
+        files = {k: v for k, v in g.read_area(_release_area(), ref=g.main).items() if k.endswith(".tml")}
+    return files
 _ORDER = {"connection": 0, "table": 1, "view": 1, "sql_view": 1,
           "model": 2, "worksheet": 2, "answer": 3, "liveboard": 4}
 
@@ -112,8 +132,7 @@ def git():
     you push/PR yourself). Otherwise commit to the GitHub repo over the API."""
     local = os.environ.get("GIT_LOCAL_DIR")
     if local:
-        _log(f"git store = local folder {local}")
-        return LocalRepo(local)
+        return LocalRepo(local)                      # local folder is instant; no trace needed
     base = os.environ.get("GIT_BASE_BRANCH", "main").strip() or "main"
     repo = github_repo()   # raises a clear RuntimeError (caught + shown by the UI) if unset
     _log(f"connecting to GitHub repo {repo} (api={os.environ.get('GITHUB_API_URL') or 'github.com'})…")
@@ -575,7 +594,55 @@ def preflight_connection(target: str) -> dict:
             "findings": findings, "drop_tokens": sorted(set(drop_tokens))}
 
 
-def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
+def read_ledger(target: str) -> dict:
+    """This target's deploy record from Git: {'files': {filename: content_hash}, 'sha', 'at'}.
+    Empty dict if the target was never deployed. The ledger lives on the base branch."""
+    g = git()
+    raw = g.read_file(_ledger_path(target), ref=g.main)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+def _update_ledger(target: str, deployed_files: dict) -> None:
+    """After a successful atomic import, record the deployed release files (filename -> content
+    hash) in the target's ledger, MERGED with prior entries. Written to the base branch so the
+    record survives across sessions and the snapshot -> PR -> merge -> deploy flow."""
+    g = git()
+    files = dict((read_ledger(target).get("files") or {}))
+    for fn, text in deployed_files.items():
+        files[fn] = _content_hash(text)
+    payload = {"target": target, "files": files,
+               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    g.put_file(_ledger_path(target), json.dumps(payload, indent=2),
+               f"chore: deploy ledger for {target}")
+
+
+def pending_for_target(target: str) -> list:
+    """Classify every release/ asset against the target's deploy ledger so the UI can show what is
+    promoted-but-not-deployed:
+        new      = never deployed to this target
+        changed  = deployed before, but the release content differs (re-promoted since)
+        deployed = deployed and unchanged
+    Returns [{file, name, type, obj_id, status}], sorted by filename."""
+    files = _read_release_files()
+    ledger = (read_ledger(target).get("files") or {})
+    rows = []
+    for fn, text in sorted(files.items()):
+        d = load_tml(text)
+        typ = tml_type(d) or "object"
+        o = d.get(typ, {}) or {}
+        old = ledger.get(fn)
+        status = "new" if old is None else ("deployed" if old == _content_hash(text) else "changed")
+        rows.append({"file": fn, "name": o.get("name", fn), "type": typ,
+                     "obj_id": d.get("obj_id", ""), "status": status})
+    return rows
+
+
+def deploy(target: str, validate_only: bool = False, drop_cols=None, files=None) -> dict:
     """Deploy release/ into a target org, remapping the connection to that org's.
 
     `target` is a key in variables/targets.json ({org_id, connection, ...}). Order:
@@ -586,7 +653,9 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
     On a failed validate the result carries `findings` = classify_import_errors(...), turning
     raw TS errors into reviewer-actionable causes/fixes. `drop_cols` (['table::col', ...]) lets
     the caller re-deploy with warehouse-missing columns (+ their dependent vizs) removed, for
-    when the target warehouse lags the source.
+    when the target warehouse lags the source. `files` (list of release filenames) scopes the
+    deploy to a selected subset (the pending-list pick); None deploys the whole release/. A
+    successful atomic import records the deployed files in the target's ledger (read_ledger).
     """
     from services.import_diagnostics import classify_import_errors, drop_columns as _drop_columns
     cfg = _targets().get(target)
@@ -594,17 +663,25 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
     ts = org_client(cfg["org_id"], role="target")   # uses TS_TOKEN_TARGET when set (bearer case)
     g = git()
-    files = {k: v for k, v in g.read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
-    if not files and _branch() and _branch() != g.main:
+    all_files = {k: v for k, v in g.read_area(_release_area(), ref=_branch()).items() if k.endswith(".tml")}
+    if not all_files and _branch() and _branch() != g.main:
         # GitHub mode: snapshot commits to the release branch and opens a PR into the base branch.
         # Once that PR is MERGED, GitHub auto-deletes the release branch, so reading it comes back
         # empty — but the merged release now lives on the base branch. Read it there so the intended
         # flow (snapshot -> PR -> approve -> merge -> deploy) works, not only deploy-before-merge.
-        files = {k: v for k, v in g.read_area(_release_area(), ref=g.main).items() if k.endswith(".tml")}
-    if not files:
+        all_files = {k: v for k, v in g.read_area(_release_area(), ref=g.main).items() if k.endswith(".tml")}
+    if not all_files:
         raise RuntimeError("release/ is empty in Git — run snapshot first (or the release PR was "
                            "merged and the base branch has no release/ — check the repo)")
-    docs = [load_tml(v) for v in files.values()]
+    # `files` (optional): deploy only this SELECTED subset of release filenames (the pending-list
+    # pick). None -> the whole release/ (the legacy whole-folder behaviour, kept for transition).
+    if files is not None:
+        use_files = {k: v for k, v in all_files.items() if k in set(files)}
+        if not use_files:
+            raise RuntimeError("none of the selected files are present in release/")
+    else:
+        use_files = all_files
+    docs = [load_tml(v) for v in use_files.values()]
     dropped = None
     if drop_cols:                                    # remove warehouse-missing columns + dependents
         docs, dropped = _drop_columns(docs, list(drop_cols))
@@ -625,6 +702,7 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None) -> dict:
                 "findings": classify_import_errors(validate) if errs else [],
                 "imported": None, "blocked": bool(errs), "dropped": dropped}
     results = ts.import_tml(strings, policy="ALL_OR_NONE")
+    _update_ledger(target, use_files)                # record what actually deployed (per-target)
     return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
             "findings": [], "imported": results, "blocked": False, "dropped": dropped}
 

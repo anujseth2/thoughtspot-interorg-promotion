@@ -64,6 +64,14 @@ class AreaGitRepo:
     def head_sha(self, ref: Optional[str] = None) -> str:
         return self._repo.get_branch(ref or self.main).commit.sha
 
+    def read_file(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        """Contents of a single file at `path` on `ref` (default main), or None if it's absent.
+        Used for small side-car files (e.g. the per-target deploy ledger) that read_area skips."""
+        try:
+            return self._repo.get_contents(path, ref=ref or self.main).decoded_content.decode("utf-8")
+        except GithubException:
+            return None
+
     # ── write ─────────────────────────────────────────────────────────────────
     def commit_area(self, area: str, files: Dict[str, str], message: str,
                     branch: Optional[str] = None,
@@ -192,6 +200,10 @@ class LocalRepo:
 
     def head_sha(self, ref: Optional[str] = None) -> str:
         return "local"
+
+    def read_file(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        p = self.root / path
+        return p.read_text(encoding="utf-8") if p.is_file() else None
 
     def commit_area(self, area: str, files: Dict[str, str], message: Optional[str] = None,
                     branch: Optional[str] = None, reset_from: Optional[str] = None) -> str:
