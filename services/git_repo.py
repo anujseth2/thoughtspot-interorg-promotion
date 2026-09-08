@@ -14,6 +14,7 @@ Uses the PyGitHub tree/blob/commit mechanics for a clean single commit per snaps
 
 import hashlib
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -82,6 +83,16 @@ class AreaGitRepo:
         except GithubException:
             base_sha = self._repo.get_branch(base or self.main).commit.sha
             self._repo.create_git_ref(f"refs/heads/{branch}", base_sha)
+
+    def last_updated(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        """ISO time (to the minute) of the last commit touching `path` on `ref` (default main),
+        or None. This is when the tool last promoted/committed that release file."""
+        try:
+            for c in self._repo.get_commits(path=path, sha=ref or self.main)[:1]:
+                return c.commit.committer.date.isoformat(timespec="minutes")
+        except GithubException:
+            pass
+        return None
 
     # ── write ─────────────────────────────────────────────────────────────────
     def commit_area(self, area: str, files: Dict[str, str], message: str,
@@ -218,6 +229,13 @@ class LocalRepo:
 
     def ensure_branch(self, branch: str, base: Optional[str] = None) -> None:
         pass                                              # branches don't apply to a local folder
+
+    def last_updated(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        """When the tool last wrote this file (filesystem mtime), to the minute, or None."""
+        p = self.root / path
+        if not p.is_file():
+            return None
+        return datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="minutes")
 
     def commit_area(self, area: str, files: Dict[str, str], message: Optional[str] = None,
                     branch: Optional[str] = None, reset_from: Optional[str] = None) -> str:
