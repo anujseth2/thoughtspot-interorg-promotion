@@ -72,6 +72,17 @@ class AreaGitRepo:
         except GithubException:
             return None
 
+    def ensure_branch(self, branch: str, base: Optional[str] = None) -> None:
+        """Create `branch` off `base` (default main) if it doesn't exist yet; no-op otherwise.
+        Creating a branch is allowed even when the base is protected (protection blocks pushes TO
+        the protected branch, not branching off it). Used for the deploy-ledger branch, which is
+        committed to directly (never PR'd) so the ledger write works on a protected base too."""
+        try:
+            self._repo.get_branch(branch)
+        except GithubException:
+            base_sha = self._repo.get_branch(base or self.main).commit.sha
+            self._repo.create_git_ref(f"refs/heads/{branch}", base_sha)
+
     # ── write ─────────────────────────────────────────────────────────────────
     def commit_area(self, area: str, files: Dict[str, str], message: str,
                     branch: Optional[str] = None,
@@ -204,6 +215,9 @@ class LocalRepo:
     def read_file(self, path: str, ref: Optional[str] = None) -> Optional[str]:
         p = self.root / path
         return p.read_text(encoding="utf-8") if p.is_file() else None
+
+    def ensure_branch(self, branch: str, base: Optional[str] = None) -> None:
+        pass                                              # branches don't apply to a local folder
 
     def commit_area(self, area: str, files: Dict[str, str], message: Optional[str] = None,
                     branch: Optional[str] = None, reset_from: Optional[str] = None) -> str:
