@@ -763,6 +763,7 @@ with tabs[3]:
             grid = pd.DataFrame([{"Include": r["status"] in ("new", "changed"),
                                   "Name": r["name"], "Type": _tf.get(r["type"], r["type"]),
                                   "status": _badge.get(r["status"], r["status"]),
+                                  "last promoted": (r.get("updated") or "—").replace("T", " "),
                                   "obj_id": r["obj_id"], "file": r["file"]} for r in pending])
             edited = st.data_editor(
                 grid, hide_index=True, use_container_width=True, key=f"pending_editor_{tgt}",
@@ -770,6 +771,9 @@ with tabs[3]:
                                "Name": st.column_config.TextColumn(disabled=True),
                                "Type": st.column_config.TextColumn(disabled=True),
                                "status": st.column_config.TextColumn("status", disabled=True),
+                               "last promoted": st.column_config.TextColumn(
+                                   "last promoted", disabled=True,
+                                   help="When the tool last wrote/committed this TML"),
                                "obj_id": st.column_config.TextColumn(disabled=True),
                                "file": st.column_config.TextColumn(disabled=True)})
             selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]

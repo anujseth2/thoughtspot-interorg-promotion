@@ -644,6 +644,8 @@ def pending_for_target(target: str) -> list:
     Returns [{file, name, type, obj_id, status}], sorted by filename."""
     files = _read_release_files()
     ledger = (read_ledger(target).get("files") or {})
+    g = git()                                   # one handle, reused for every file's commit time
+    area, ref = _release_area(), (_branch() or g.main)
     rows = []
     for fn, text in sorted(files.items()):
         d = load_tml(text)
@@ -651,8 +653,12 @@ def pending_for_target(target: str) -> list:
         o = d.get(typ, {}) or {}
         old = ledger.get(fn)
         status = "new" if old is None else ("deployed" if old == _content_hash(text) else "changed")
+        try:
+            updated = g.last_updated(f"{area}/{fn}", ref=ref)   # last promoted/committed time
+        except Exception:
+            updated = None
         rows.append({"file": fn, "name": o.get("name", fn), "type": typ,
-                     "obj_id": d.get("obj_id", ""), "status": status})
+                     "obj_id": d.get("obj_id", ""), "status": status, "updated": updated})
     return rows
 
 
