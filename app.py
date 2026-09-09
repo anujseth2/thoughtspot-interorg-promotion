@@ -741,6 +741,7 @@ with tabs[3]:
                 ss["pending"] = pipeline.pending_for_target(tgt)
                 ss["release_files"] = pipeline._read_release_files()   # cached for dep expansion
                 ss["pending_tgt"] = tgt
+                ss.pop(f"dep_sel_{tgt}", None)         # reseed selection from the fresh statuses
                 ss.pop("pending_err", None)
             except Exception as e:
                 ss["pending"] = []
@@ -767,23 +768,70 @@ with tabs[3]:
                 st.warning(f"{n_dup} asset(s) exist in the target under a DIFFERENT obj_id - importing "
                            "would create duplicates. Align the obj_id on the selection view before "
                            "snapshotting, rather than deploying these as-is.")
-            grid = pd.DataFrame([{"Include": r["status"] == "new",
-                                  "Name": r["name"], "Type": _tf.get(r["type"], r["type"]),
-                                  "status": _badge.get(r["status"], r["status"]),
-                                  "last promoted": (r.get("updated") or "—").replace("T", " "),
-                                  "obj_id": r["obj_id"], "file": r["file"]} for r in pending])
-            edited = st.data_editor(
-                grid, hide_index=True, use_container_width=True, key=f"pending_editor_{tgt}",
-                column_config={"Include": st.column_config.CheckboxColumn("Include"),
-                               "Name": st.column_config.TextColumn(disabled=True),
-                               "Type": st.column_config.TextColumn(disabled=True),
-                               "status": st.column_config.TextColumn("status", disabled=True),
-                               "last promoted": st.column_config.TextColumn(
-                                   "last promoted", disabled=True,
-                                   help="When the tool last wrote/committed this TML"),
-                               "obj_id": st.column_config.TextColumn(disabled=True),
-                               "file": st.column_config.TextColumn(disabled=True)})
-            selected = [row["file"] for _, row in edited.iterrows() if row["Include"]]
+            # Selection lives in session state (a set of filenames) so searching/filtering NEVER
+            # loses ticks - only the rows on screen are written back. Seeded with what the target
+            # doesn't have yet; reseeded whenever the pending list is recomputed.
+            sel_key = f"dep_sel_{tgt}"
+            if sel_key not in ss:
+                ss[sel_key] = {r["file"] for r in pending if r["status"] == "new"}
+
+            f1, f2, f3 = st.columns([3, 2, 2])
+            q = f1.text_input("Search", value="", key=f"dep_q_{tgt}",
+                              placeholder="name, obj_id or file…").strip().lower()
+            pick_types = f2.multiselect("Type", sorted({_tf.get(r["type"], r["type"]) for r in pending}),
+                                        default=[], key=f"dep_ty_{tgt}")
+            pick_status = f3.multiselect("Status", [_badge[s] for s in ("new", "in_place", "would_duplicate")],
+                                         default=[], key=f"dep_st_{tgt}")
+
+            def _shown(r):
+                if q and q not in f"{r['name']} {r['obj_id']} {r['file']}".lower():
+                    return False
+                if pick_types and _tf.get(r["type"], r["type"]) not in pick_types:
+                    return False
+                if pick_status and _badge.get(r["status"], r["status"]) not in pick_status:
+                    return False
+                return True
+            # grouped by type, so picking "all the liveboards" is a glance rather than a hunt
+            view = sorted([r for r in pending if _shown(r)],
+                          key=lambda r: (_tf.get(r["type"], r["type"]), r["name"].lower()))
+
+            b1, b2, b3 = st.columns([1.4, 1.2, 4])
+            if b1.button(f"Select all shown ({len(view)})", key=f"dep_all_{tgt}", disabled=not view):
+                ss[sel_key] |= {r["file"] for r in view}
+                st.rerun()
+            if b2.button("Deselect all", key=f"dep_none_{tgt}"):
+                ss[sel_key] = set()
+                st.rerun()
+            b3.caption(f"**{len(ss[sel_key])}** selected of {len(pending)} in the release"
+                       + (f" · showing {len(view)}" if len(view) != len(pending) else ""))
+
+            if not view:
+                st.info("No assets match the current search / filters.")
+            else:
+                grid = pd.DataFrame([{"Include": r["file"] in ss[sel_key],
+                                      "Name": r["name"], "Type": _tf.get(r["type"], r["type"]),
+                                      "status": _badge.get(r["status"], r["status"]),
+                                      "last promoted": (r.get("updated") or "—").replace("T", " "),
+                                      "obj_id": r["obj_id"], "file": r["file"]} for r in view])
+                edited = st.data_editor(
+                    grid, hide_index=True, use_container_width=True,
+                    # key tracks the filters so the editor remounts cleanly on a new row set
+                    key=f"pending_editor_{tgt}_{hash((q, tuple(pick_types), tuple(pick_status)))}",
+                    column_config={"Include": st.column_config.CheckboxColumn("Include"),
+                                   "Name": st.column_config.TextColumn(disabled=True),
+                                   "Type": st.column_config.TextColumn(disabled=True),
+                                   "status": st.column_config.TextColumn("status", disabled=True),
+                                   "last promoted": st.column_config.TextColumn(
+                                       "last promoted", disabled=True,
+                                       help="When the tool last wrote/committed this TML"),
+                                   "obj_id": st.column_config.TextColumn(disabled=True),
+                                   "file": st.column_config.TextColumn(disabled=True)})
+                for _, row in edited.iterrows():          # write back ONLY the visible rows
+                    if row["Include"]:
+                        ss[sel_key].add(row["file"])
+                    else:
+                        ss[sel_key].discard(row["file"])
+            selected = sorted(ss[sel_key])
             # Auto-include each ticked asset's in-release dependencies (a liveboard pulls its model
             # + tables) so the imported set is self-contained - but skip deps the target already has,
             # since they're satisfied there and re-importing them is redundant.
@@ -860,10 +908,28 @@ with tabs[3]:
                 st.success("Validation passed. Use **Deploy selection** to import the confirmed set "
                            "atomically.")
             elif r.get("imported"):
+                # Say plainly whether each object was CREATED with a new id or UPDATED in place,
+                # using the pre-deploy obj_id verdict, so a new id is never just an unexplained
+                # warning. Matched by name (release filenames are collision-guarded).
+                _pre = {p["name"]: p["status"] for p in (ss.get("pending") or [])}
+                _out = {"new": "🆕 created new", "in_place": "✅ updated in place",
+                        "would_duplicate": "⚠️ created as DUPLICATE"}
+                _rows = [{"outcome": _out.get(_pre.get(v["name"]), "—") if v["status"] == "OK" else "",
+                          "status": v["status"], "type": v["type"], "name": v["name"],
+                          "new obj_id / guid": v.get("new_id"), "error": v.get("error") or ""}
+                         for v in r["imported"]]
+                n_created = sum(1 for x in _rows if x["outcome"].startswith("🆕"))
+                n_updated = sum(1 for x in _rows if x["outcome"].startswith("✅"))
+                n_dupd = sum(1 for x in _rows if x["outcome"].startswith("⚠️"))
                 st.write("**Import:**")
-                st.table([{"status": v["status"], "type": v["type"], "name": v["name"],
-                           "new_id": v.get("new_id"), "error": v.get("error") or ""} for v in r["imported"]])
-                st.success(f"Deployed to `{tgt}`. Re-run is idempotent.")
+                st.table(_rows)
+                _msg = (f"Deployed to `{tgt}` — **{n_created} created new** (a fresh id was formed in "
+                        f"the target), **{n_updated} updated in place** (matched on obj_id, no "
+                        f"duplicate). Re-run is idempotent.")
+                if n_dupd:
+                    st.warning(f"{n_dupd} object(s) were created as DUPLICATES — they existed in the "
+                               "target under a different obj_id. Align the obj_id and re-promote.")
+                st.success(_msg)
 
                 # ── Post-import reconciliation: verify against the LIVE target ──
                 with st.spinner("Reconciling against the target org…"):
