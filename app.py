@@ -734,21 +734,37 @@ with tabs[3]:
         tgt = st.selectbox("Target", list(targets.keys()),
                            format_func=lambda k: f"{targets[k].get('name', k)}  ({k})")
 
-        # Release assets classified LIVE against THIS target (obj_id lookup per object). Computed on
-        # target change or an explicit refresh, not every rerun, since it queries the cluster.
-        if st.button("↻ Refresh pending") or ss.get("pending_tgt") != tgt:
-            try:
-                ss["pending"] = pipeline.pending_for_target(tgt)
-                ss["release_files"] = pipeline._read_release_files()   # cached for dep expansion
-                ss["pending_tgt"] = tgt
-                ss.pop(f"dep_sel_{tgt}", None)         # reseed selection from the fresh statuses
-                ss.pop("pending_err", None)
-            except Exception as e:
-                ss["pending"] = []
-                ss["pending_err"] = str(e)
-        if ss.get("pending_err"):
-            st.error(f"Couldn't check the release against the target - {ss['pending_err']}")
-        pending = ss.get("pending", []) if ss.get("pending_tgt") == tgt else []
+        # Classifying the release against the target is several seconds of live API calls, and
+        # Streamlit re-runs EVERY tab's code on EVERY interaction. So this is explicit, never
+        # automatic - otherwise it blocks unrelated work (Setup's "Test connection" appears to hang
+        # while this finishes). The result is cached per target until you refresh.
+        _loaded = ss.get("pending_tgt") == tgt
+        if st.button("↻ Refresh against target" if _loaded else "🔍 Check against target",
+                     key=f"dep_check_{tgt}", type="secondary" if _loaded else "primary"):
+            with st.spinner(f"Checking the release against {targets[tgt].get('name', tgt)}…"):
+                try:
+                    ss["pending"] = pipeline.pending_for_target(tgt)
+                    ss["release_files"] = pipeline._read_release_files()  # cached for dep expansion
+                    ss.pop("pending_err", None)
+                except Exception as e:
+                    ss["pending"] = []
+                    ss["pending_err"] = str(e)
+                finally:
+                    # ALWAYS mark this target as attempted, success or not. Setting it only on
+                    # success made a failing check re-run on every rerun, hanging the whole app.
+                    ss["pending_tgt"] = tgt
+                    ss.pop(f"dep_sel_{tgt}", None)     # reseed selection from the fresh statuses
+            st.rerun()
+
+        if ss.get("pending_tgt") != tgt:
+            st.info(f"Click **Check against target** to see which release assets are already in "
+                    f"**{targets[tgt].get('name', tgt)}** and which are new. This queries the "
+                    "cluster, so it runs only when you ask for it.")
+            pending = []
+        else:
+            if ss.get("pending_err"):
+                st.error(f"Couldn't check the release against the target - {ss['pending_err']}")
+            pending = ss.get("pending", [])
 
         _badge = {"new": "🆕 new", "in_place": "✅ in target", "would_duplicate": "⚠️ would DUPLICATE"}
         _tf = {"table": "Table", "view": "View", "sql_view": "SQL View", "model": "Model",

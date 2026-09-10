@@ -351,41 +351,40 @@ def check_target_alignment(target: str) -> dict:
       would_duplicate- target has the same NAME under a DIFFERENT obj_id -> import would create a
                        DUPLICATE; align the release obj_id to the target's (suggest map) first
       new            - target has no such object -> created fresh on import
-    Returns {rows:[{name,type,obj_id,verdict,target_obj_id}], suggest:{source_obj_id: target_obj_id}}.
-    Lightweight (inter-org, same warehouse) - no column-overlap scoring; matches by obj_id then name."""
+    Returns {rows:[{file,name,type,obj_id,verdict,target_obj_id}], suggest:{source_obj_id: target_obj_id}}.
+    BATCHED: one slim metadata/search per distinct object TYPE, indexed in memory, rather than up to
+    two searches per object - the per-object version cost ~17s on an 11-asset release and blocked the
+    whole Streamlit run. Lightweight (inter-org, same warehouse); matches by obj_id then name."""
     from services.ts_client import api_metadata_type
     cfg = _targets().get(target)
     if not cfg:
         raise RuntimeError(f"target '{target}' not in variables/targets.json")
     ts = org_client(cfg["org_id"], role="target")
-    area = _read_release_files()                 # release branch, then base once the PR is merged
+    docs = {fn: load_tml(txt) for fn, txt in _read_release_files().items()}
+
+    index = {}
+    for api in {api_metadata_type(tml_type(d) or "object") for d in docs.values()}:
+        try:
+            r = ts._post("/api/rest/2.0/metadata/search",
+                         {"metadata": [{"type": api}], "record_size": -1,
+                          "include_details": False, "include_dependent_objects": False})
+            items = r if isinstance(r, list) else r.get("metadata", [])
+        except Exception:
+            items = []                                   # unreachable type -> everything reads new
+        index[api] = ({i.get("metadata_obj_id") for i in items if i.get("metadata_obj_id")},
+                      {i.get("metadata_name"): i.get("metadata_obj_id") for i in items})
+
     rows, suggest = [], {}
-    for fn, txt in area.items():
-        d = load_tml(txt)
+    for fn, d in docs.items():
         t = tml_type(d) or "object"
         name = (d.get(t, {}) or {}).get("name", "")
         oid = d.get("obj_id", "")
-        api = api_metadata_type(t)
-
-        def _search(payload):
-            r = ts._post("/api/rest/2.0/metadata/search", payload)
-            return r if isinstance(r, list) else r.get("metadata", [])
-
-        try:
-            has_oid = bool(_search({"metadata": [{"type": api, "obj_identifier": oid}], "record_size": 1}))
-        except Exception:
-            has_oid = False
-        if has_oid:
+        oids, names = index.get(api_metadata_type(t), (set(), {}))
+        if oid and oid in oids:
             rows.append({"file": fn, "name": name, "type": t, "obj_id": oid,
                          "verdict": "in_place", "target_obj_id": oid})
             continue
-        tobj = ""
-        try:
-            cand = next((it for it in _search({"metadata": [{"type": api, "identifier": name}], "record_size": -1})
-                         if it.get("metadata_name") == name), None)
-            tobj = (cand or {}).get("metadata_obj_id", "")
-        except Exception:
-            tobj = ""
+        tobj = names.get(name) or ""
         if tobj and tobj != oid:
             rows.append({"file": fn, "name": name, "type": t, "obj_id": oid,
                          "verdict": "would_duplicate", "target_obj_id": tobj})
