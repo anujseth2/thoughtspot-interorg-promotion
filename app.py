@@ -40,6 +40,28 @@ def _is_system(asset: dict) -> bool:
     return (asset.get("name") or "").strip() in _SYSTEM_NAMES
 
 
+_RESOLVE_CACHE_KEYS = ("deps_key", "tag_deps_key", "deps_preview", "tag_deps", "coll_deps")
+
+
+def _fmt_align_errors(errs):
+    """align_source_obj_ids returns errors as (old, new, msg) TUPLES. Joining them raw raised
+    'expected str instance, tuple found', which swallowed the real failure."""
+    out = []
+    for e in errs or []:
+        if isinstance(e, (list, tuple)) and len(e) >= 3:
+            out.append(f"`{e[0]}` → `{e[1]}`: {e[2]}")
+        else:
+            out.append(str(e))
+    return "; ".join(out)
+
+
+def _drop_resolution_cache():
+    """Forget the cached dependency resolution so the next render re-reads obj_ids from the SOURCE.
+    Without this, a successful align still showed the OLD obj_id and re-reported would_duplicate."""
+    for ck in _RESOLVE_CACHE_KEYS:
+        st.session_state.pop(ck, None)
+
+
 def _select_set(dp, namemap, key, src=None):
     """Selectable resolved-set editor used by every scope (Pick assets / By tag / By collection).
     dp = {groups:[{root_id, objects:[{name,type,obj_id,guid}]}], failures} from preview_dependencies;
@@ -47,6 +69,8 @@ def _select_set(dp, namemap, key, src=None):
     Include checkbox (default on) + a 'Used by' column, and returns the guids the user kept — so the
     snapshot promotes exactly that set. Also renders the obj_id alignment vs target inline (right on
     this selection view) for the kept objects. Returns [] when nothing is resolved/selected."""
+    if st.session_state.get("_align_msg"):      # survives the post-align rerun
+        st.success(st.session_state.pop("_align_msg"))
     if not dp:
         return []
     if dp.get("error"):
@@ -101,15 +125,13 @@ def _select_set(dp, namemap, key, src=None):
                 try:
                     res = pipeline.align_source_obj_ids(edits, src)
                     if res.get("errors"):
-                        st.error("Some rewrites failed: " + "; ".join(res["errors"]))
+                        st.error("Some rewrites failed: " + _fmt_align_errors(res["errors"]))
                     if res.get("done"):
-                        st.success(f"Renamed {len(res['done'])} obj_id(s) on the source org. "
-                                   "Re-resolve (change and restore the selection, or re-run the scope) "
-                                   "to see the new values, then Snapshot.")
-                        # drop cached resolution so the next render re-reads the new obj_ids
-                        for ck in ("deps_key", "tag_deps_key", "deps_preview", "tag_deps", "coll_deps"):
-                            ss = st.session_state
-                            ss.pop(ck, None)
+                        st.session_state["_align_msg"] = (
+                            f"Renamed {len(res['done'])} obj_id(s) on the source org and re-read the "
+                            "source. Re-snapshot so the release picks up the new obj_id.")
+                        _drop_resolution_cache()
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Apply failed: {e}")
     sel_objs = [{"name": flat[g]["Name"], "type": flat[g]["rawtype"], "obj_id": flat[g]["obj_id"]}
@@ -162,12 +184,20 @@ def _align_section(objects, key, src=None):
                     with st.spinner("Rewriting obj_ids on the source org…"):
                         try:
                             res = pipeline.align_source_obj_ids(dups, src)
+                            st.session_state.pop(f"{key}_ares", None)   # stale verdicts
                             if res.get("errors"):
-                                st.error("Some rewrites failed: " + "; ".join(res["errors"]))
+                                st.error("Some rewrites failed: " + _fmt_align_errors(res["errors"])
+                                         + "  (an obj_id that no longer exists on the source usually "
+                                           "means it was already aligned by an earlier run)")
                             if res.get("done"):
-                                st.success(f"Aligned {len(res['done'])} obj_id(s) on the source. "
-                                           "Re-check or re-resolve, then Snapshot.")
-                            st.session_state.pop(f"{key}_ares", None)
+                                st.session_state["_align_msg"] = (
+                                    f"Aligned {len(res['done'])} obj_id(s) on the source and re-read "
+                                    "it. Re-snapshot so the release picks up the new obj_id, then "
+                                    "deploy.")
+                                # MUST drop the cached resolution: it still holds the OLD obj_ids, so
+                                # re-checking without this re-reports would_duplicate on a done align.
+                                _drop_resolution_cache()
+                                st.rerun()
                         except Exception as e:
                             st.error(f"Align failed: {e}")
             else:
