@@ -42,6 +42,72 @@ def _manifest_path() -> str:
     b = _base()
     return f"{b}/variables/manifest.json" if b else "variables/manifest.json"
 
+PR_TEMPLATE_PATH = ROOT / "variables" / "pr_template.md"
+PR_TOKENS = ("description", "files", "count", "source_org", "branch", "base_branch", "date", "sha")
+
+
+def read_pr_template() -> str:
+    """The operator's PR description template. Stored LOCALLY and git-ignored: a customer's template
+    carries their internal wiki/SharePoint links and must never land in this (public) repo."""
+    try:
+        return PR_TEMPLATE_PATH.read_text(encoding="utf-8") if PR_TEMPLATE_PATH.exists() else ""
+    except Exception:
+        return ""
+
+
+def write_pr_template(text: str) -> str:
+    PR_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PR_TEMPLATE_PATH.write_text(text or "", encoding="utf-8")
+    return str(PR_TEMPLATE_PATH)
+
+
+PR_TEMPLATE_NAMES = (".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md",
+                     "docs/pull_request_template.md", "pull_request_template.md")
+
+
+def repo_pr_template() -> str:
+    """The repo's OWN pull-request template. GitHub auto-applies this to PRs opened in the web UI
+    but NOT to API-created ones, which is why the tool has to send the body explicitly.
+
+    GitHub mode: read from the BASE branch (stable) at the REPO ROOT - GIT_BASE_PATH is deliberately
+    not applied, because GitHub only honours the file at the root, which is the template we want even
+    when the release is nested deep in a monorepo.
+    Local-folder mode: the release folder usually sits INSIDE a clone (e.g.
+    <clone>/Modules/Data Hub/thoughtspot), so the template is at the clone root several levels up.
+    Walk up to the directory holding .git and look there."""
+    g = git()
+    for path in PR_TEMPLATE_NAMES:
+        try:
+            txt = g.read_file(path)
+        except Exception:
+            txt = None
+        if txt:
+            return txt
+    root = getattr(g, "root", None)                  # local-folder backend only
+    if root:
+        d = Path(root).expanduser().resolve()
+        for cand in [d, *d.parents]:
+            if (cand / ".git").exists():             # the clone root
+                for path in PR_TEMPLATE_NAMES:
+                    f = cand / path
+                    if f.is_file():
+                        try:
+                            return f.read_text(encoding="utf-8")
+                        except Exception:
+                            pass
+                break
+    return ""
+
+
+def render_pr_body(template: str, **vals) -> str:
+    """Substitute {{token}} (surrounding spaces tolerated) and leave every other byte untouched, so
+    the tool never has to parse the customer's markdown and survives them rewriting it."""
+    out = template or ""
+    for k, v in vals.items():
+        out = re.sub(r"\{\{\s*" + re.escape(k) + r"\s*\}\}", lambda _m, _v=str(v): _v, out)
+    return out
+
+
 def _read_release_files() -> dict:
     """{filename: yaml} for every .tml in release/. Reads the release branch, then falls back to the
     base branch (GitHub mode after the release PR is merged and the branch is auto-deleted)."""
@@ -211,7 +277,8 @@ def resolve_collection(collection_id, source_org=None):
 
 
 def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
-             collection=None, include_dependencies=True, progress=None) -> dict:
+             collection=None, include_dependencies=True, progress=None,
+             pr_description="") -> dict:
     def _p(msg):                                   # report a phase: server log + optional UI callback
         _log(msg)
         if callable(progress):
@@ -300,9 +367,19 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     pr_url = None
     if branch:                                  # open (or reuse) a PR into main for review/merge
         _p("Opening pull request…")
+        _tpl = read_pr_template()
+        _title = os.environ.get("GIT_PR_TITLE", "").strip() or "ThoughtSpot inter-org release"
+        if _tpl.strip():                             # operator's own template, used verbatim
+            _body = render_pr_body(
+                _tpl, description=pr_description or "",
+                files="\n".join(f"- `{f}`" for f in sorted(files)), count=len(files),
+                source_org=str(source_org or os.environ.get("TS_ORG_SOURCE", "")),
+                branch=branch or "", base_branch=g.main,
+                date=time.strftime("%Y-%m-%d"), sha=(sha or "")[:8])
+        else:
+            _body = f"Parameterized `release/` snapshot. Review and merge to record it on `{g.main}`."
         try:
-            pr_url = g.open_pr(branch, "ThoughtSpot inter-org release",
-                               f"Parameterized `release/` snapshot. Review and merge to record it on `{g.main}`.")
+            pr_url = g.open_pr(branch, _title, _body)
         except Exception as e:
             warns.append(f"committed to '{branch}', but no PR opened: {str(e)[:140]}")
     _p("Done.")

@@ -65,6 +65,14 @@ class AreaGitRepo:
     def head_sha(self, ref: Optional[str] = None) -> str:
         return self._repo.get_branch(ref or self.main).commit.sha
 
+    def read_file(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        """Contents of a single file at `path` on `ref` (default main), or None if absent.
+        Used to pull the repo's own .github/pull_request_template.md."""
+        try:
+            return self._repo.get_contents(path, ref=ref or self.main).decoded_content.decode("utf-8")
+        except GithubException:
+            return None
+
     def last_updated(self, path: str, ref: Optional[str] = None) -> Optional[str]:
         """ISO time (to the minute) of the last commit touching `path` on `ref` (default main),
         or None. This is when the tool last promoted/committed that release file."""
@@ -203,6 +211,10 @@ class LocalRepo:
 
     def head_sha(self, ref: Optional[str] = None) -> str:
         return "local"
+
+    def read_file(self, path: str, ref: Optional[str] = None) -> Optional[str]:
+        p = self.root / path
+        return p.read_text(encoding="utf-8") if p.is_file() else None
 
     def last_updated(self, path: str, ref: Optional[str] = None) -> Optional[str]:
         """When the tool last wrote this file (filesystem mtime), to the minute, or None."""
