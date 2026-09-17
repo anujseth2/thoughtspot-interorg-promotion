@@ -394,7 +394,9 @@ with tabs[0]:
                    "links never enter this repo) and used verbatim. Any of these tokens are "
                    "substituted, everything else is left byte-for-byte: "
                    "`{{description}}` `{{files}}` `{{count}}` `{{source_org}}` `{{branch}}` "
-                   "`{{base_branch}}` `{{date}}` `{{sha}}`. Leave blank for the default one-liner.")
+                   "`{{base_branch}}` `{{date}}` `{{sha}}`. **Leave it blank** to use the repo's own "
+                   "`pull_request_template.md`, read fresh each time so it always tracks whatever "
+                   "your team maintains centrally; fill the box only to override that.")
         ss["pr_title"] = st.text_input(
             "PR title", value=ss.get("pr_title", "") or os.environ.get("GIT_PR_TITLE", "")
             or "ThoughtSpot inter-org release")

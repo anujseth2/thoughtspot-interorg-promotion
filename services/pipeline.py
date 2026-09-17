@@ -368,6 +368,14 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     if branch:                                  # open (or reuse) a PR into main for review/merge
         _p("Opening pull request…")
         _tpl = read_pr_template()
+        if not _tpl.strip():
+            # Nothing saved locally -> use the REPO's own template, read LIVE at PR time. A saved
+            # copy is a snapshot and goes stale the moment the team updates the checklist centrally,
+            # which would stamp an outdated (but compliant-looking) checklist on every PR.
+            try:
+                _tpl = repo_pr_template()
+            except Exception:
+                _tpl = ""
         _title = os.environ.get("GIT_PR_TITLE", "").strip() or "ThoughtSpot inter-org release"
         if _tpl.strip():                             # operator's own template, used verbatim
             _body = render_pr_body(
