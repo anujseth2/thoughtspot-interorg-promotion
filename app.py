@@ -227,7 +227,8 @@ def _resnapshot():
     si = st.session_state.get("snap_inputs") or {}
     st.session_state["snap_result"] = pipeline.snapshot(
         source_org=si.get("src") or None, from_seed=si.get("from_seed", False),
-        object_ids=si.get("object_ids") or None, include_dependencies=si.get("incl", True))
+        object_ids=si.get("object_ids") or None, include_dependencies=si.get("incl", True),
+        pr_description=st.session_state.get("pr_desc", ""))
 
 load_dotenv()
 
@@ -313,7 +314,8 @@ with tabs[0]:
                 "git_local_dir": ss.get("git_local_dir", ""),
                 "github_repo": ss.get("github_repo", ""), "github_token": ss.get("github_token", ""),
                 "git_branch": ss.get("git_branch", ""), "git_base_branch": ss.get("git_base_branch", ""),
-                "github_api_url": ss.get("github_api_url", ""), "git_base_path": ss.get("git_base_path", "")}
+                "github_api_url": ss.get("github_api_url", ""), "git_base_path": ss.get("git_base_path", ""),
+                "pr_title": ss.get("pr_title", "")}
 
     if st.button("Test connection & load orgs", type="primary"):
         try:
@@ -383,6 +385,42 @@ with tabs[0]:
         ss["git_base_path"] = st.text_input(
             "Subfolder (optional) - nest the release under this path in the repo/folder (e.g. thoughtspot). Blank = root.",
             value=ss.get("git_base_path", "") or os.environ.get("GIT_BASE_PATH", ""))
+
+        # ── Pull request (GitHub mode) ──
+        st.markdown("**Pull request**")
+        st.caption("GitHub applies `.github/pull_request_template.md` to PRs opened in its web UI, "
+                   "but NOT to ones created through the API - so the tool sends the body itself. "
+                   "Paste your template here; it is stored locally and git-ignored (your internal "
+                   "links never enter this repo) and used verbatim. Any of these tokens are "
+                   "substituted, everything else is left byte-for-byte: "
+                   "`{{description}}` `{{files}}` `{{count}}` `{{source_org}}` `{{branch}}` "
+                   "`{{base_branch}}` `{{date}}` `{{sha}}`. Leave blank for the default one-liner.")
+        ss["pr_title"] = st.text_input(
+            "PR title", value=ss.get("pr_title", "") or os.environ.get("GIT_PR_TITLE", "")
+            or "ThoughtSpot inter-org release")
+        if "pr_template_box" not in ss:
+            ss["pr_template_box"] = pipeline.read_pr_template()
+        st.text_area("PR description template (markdown)", height=240, key="pr_template_box")
+        prc1, prc2, prc3 = st.columns([1.2, 1.6, 4])
+        if prc1.button("Load from repo"):
+            try:
+                _t = pipeline.repo_pr_template()
+                if _t:
+                    ss["pr_template_box"] = _t
+                    st.rerun()
+                else:
+                    st.warning("No pull_request_template.md found in the repo "
+                               "(looked in .github/, docs/ and the root).")
+            except Exception as e:
+                st.error(f"Couldn't read the repo template - {type(e).__name__}: {str(e)[:200]}")
+        if prc2.button("Save pull request template"):
+            try:
+                _path = pipeline.write_pr_template(ss.get("pr_template_box", ""))
+                ui_setup.set_env_values({"GIT_PR_TITLE": ss.get("pr_title", "")})
+                st.success(f"Saved. Template -> {_path} (git-ignored); title -> .env.")
+            except Exception as e:
+                st.error(f"Save failed - {type(e).__name__}: {str(e)[:200]}")
+        prc3.caption("")
 
         st.markdown("**Options**")
         ss["resolve_local"] = st.checkbox(
@@ -659,6 +697,8 @@ with tabs[1]:
             else:
                 st.info("Click **List collections in the source org** to choose one.")
 
+    st.text_input("PR description (fills `{{description}}` in your template)", key="pr_desc",
+                  placeholder="Jira ticket, target version, feature flags…")
     if st.button("Snapshot", type="primary"):
         _needs_pick = scope in ("Pick assets", "By tag", "By collection")
         if _needs_pick and not object_ids:
@@ -676,6 +716,7 @@ with tabs[1]:
                     ss["snap_result"] = pipeline.snapshot(source_org=src or None, from_seed=from_seed,
                                                           object_ids=object_ids or None,
                                                           include_dependencies=(not _needs_pick),
+                                                          pr_description=ss.get("pr_desc", ""),
                                                           progress=lambda m: _snap_status.write(m))
                     _snap_status.update(label="Snapshot complete", state="complete")
                     ss["snap_inputs"] = {"src": src, "from_seed": from_seed,

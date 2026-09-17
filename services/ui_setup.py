@@ -24,7 +24,7 @@ ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_TOKEN_TARGET", 
             "TS_CA_BUNDLE", "TS_VERIFY_SSL",
             "TS_ORG_PRIMARY", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
             "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH", "GIT_BASE_BRANCH",
-            "GITHUB_API_URL", "GIT_BASE_PATH"]
+            "GITHUB_API_URL", "GIT_BASE_PATH", "GIT_PR_TITLE"]
 
 
 def _verify_from_cfg(cfg: dict):
@@ -154,6 +154,7 @@ def env_values(cfg: dict) -> dict:
         "GIT_BASE_BRANCH": cfg.get("git_base_branch", ""),
         "GITHUB_API_URL": cfg.get("github_api_url", ""),
         "GIT_BASE_PATH": cfg.get("git_base_path", ""),
+        "GIT_PR_TITLE": cfg.get("pr_title", ""),
     }
 
 
@@ -175,3 +176,19 @@ def write_config(cfg: dict, orgs_config: dict):
     ORGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     ORGS_PATH.write_text(json.dumps(orgs_config, indent=2), encoding="utf-8")
     return str(ENV_PATH), str(ORGS_PATH)
+
+
+def set_env_values(pairs: dict):
+    """Update just these keys in .env + os.environ, leaving every other key intact. write_config()
+    rewrites .env wholesale from ENV_KEYS; this is for saving one section on its own."""
+    cur = {}
+    if ENV_PATH.exists():
+        for ln in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            if "=" in ln and not ln.strip().startswith("#"):
+                k, v = ln.split("=", 1)
+                cur[k.strip()] = v
+    cur.update({k: (v or "") for k, v in pairs.items()})
+    ENV_PATH.write_text("\n".join(f"{k}={v}" for k, v in cur.items() if v) + "\n", encoding="utf-8")
+    for k, v in pairs.items():
+        os.environ[k] = v or ""
+    return str(ENV_PATH)

@@ -8,3 +8,4 @@ variables/targets.json
 variables/orgs.json
 .demo_release/
 *.predemo.bak
+variables/pr_template.md
