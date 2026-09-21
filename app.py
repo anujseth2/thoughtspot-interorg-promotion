@@ -228,7 +228,7 @@ def _resnapshot():
     st.session_state["snap_result"] = pipeline.snapshot(
         source_org=si.get("src") or None, from_seed=si.get("from_seed", False),
         object_ids=si.get("object_ids") or None, include_dependencies=si.get("incl", True),
-        pr_description=st.session_state.get("pr_desc", ""))
+        pr_body=st.session_state.get("pr_body_box", ""))
 
 load_dotenv()
 
@@ -314,8 +314,7 @@ with tabs[0]:
                 "git_local_dir": ss.get("git_local_dir", ""),
                 "github_repo": ss.get("github_repo", ""), "github_token": ss.get("github_token", ""),
                 "git_branch": ss.get("git_branch", ""), "git_base_branch": ss.get("git_base_branch", ""),
-                "github_api_url": ss.get("github_api_url", ""), "git_base_path": ss.get("git_base_path", ""),
-                "pr_title": ss.get("pr_title", "")}
+                "github_api_url": ss.get("github_api_url", ""), "git_base_path": ss.get("git_base_path", "")}
 
     if st.button("Test connection & load orgs", type="primary"):
         try:
@@ -390,16 +389,11 @@ with tabs[0]:
         st.markdown("**Pull request**")
         st.caption("GitHub applies `.github/pull_request_template.md` to PRs opened in its web UI, "
                    "but NOT to ones created through the API - so the tool sends the body itself. "
-                   "Paste your template here; it is stored locally and git-ignored (your internal "
-                   "links never enter this repo) and used verbatim. Any of these tokens are "
-                   "substituted, everything else is left byte-for-byte: "
-                   "`{{description}}` `{{files}}` `{{count}}` `{{source_org}}` `{{branch}}` "
-                   "`{{base_branch}}` `{{date}}` `{{sha}}`. **Leave it blank** to use the repo's own "
-                   "`pull_request_template.md`, read fresh each time so it always tracks whatever "
-                   "your team maintains centrally; fill the box only to override that.")
-        ss["pr_title"] = st.text_input(
-            "PR title", value=ss.get("pr_title", "") or os.environ.get("GIT_PR_TITLE", "")
-            or "ThoughtSpot inter-org release")
+                   "**Leave this blank** and the tool uses your repo's own template, read fresh each "
+                   "time, so it always tracks whatever your team maintains centrally. Fill it only to "
+                   "set a different default. Either way it is submitted verbatim, and it is stored "
+                   "locally and git-ignored so your internal links never enter this repo. You confirm "
+                   "and edit the final text per promotion on the Snapshot tab.")
         if "pr_template_box" not in ss:
             ss["pr_template_box"] = pipeline.read_pr_template()
         st.text_area("PR description template (markdown)", height=240, key="pr_template_box")
@@ -418,8 +412,7 @@ with tabs[0]:
         if prc2.button("Save pull request template"):
             try:
                 _path = pipeline.write_pr_template(ss.get("pr_template_box", ""))
-                ui_setup.set_env_values({"GIT_PR_TITLE": ss.get("pr_title", "")})
-                st.success(f"Saved. Template -> {_path} (git-ignored); title -> .env.")
+                st.success(f"Saved to {_path} (git-ignored).")
             except Exception as e:
                 st.error(f"Save failed - {type(e).__name__}: {str(e)[:200]}")
         prc3.caption("")
@@ -699,8 +692,35 @@ with tabs[1]:
             else:
                 st.info("Click **List collections in the source org** to choose one.")
 
-    st.text_input("PR description (fills `{{description}}` in your template)", key="pr_desc",
-                  placeholder="Jira ticket, target version, feature flags…")
+    # The full PR comment for THIS promotion: pre-filled from your template, editable, submitted
+    # verbatim. Seeded ONCE per session - reading the repo template is an API call, and Streamlit
+    # re-runs every tab on every interaction, so seeding inline would fire on each click.
+    if "pr_body_box" not in ss:
+        _seed = pipeline.read_pr_template()
+        if not _seed.strip():
+            try:
+                _seed = pipeline.repo_pr_template()
+            except Exception:
+                _seed = ""
+        ss["pr_body_box"] = _seed
+    _has_tpl = bool(ss.get("pr_body_box", "").strip())
+    with st.expander("📝 Pull request description"
+                     + (f" — {len(ss['pr_body_box'].splitlines())} lines loaded, click to edit"
+                        if _has_tpl else " — no template found, click to write one"),
+                     expanded=False):
+        st.caption("Submitted as the PR description exactly as it appears here. Edit it for this "
+                   "promotion (Jira ticket, target version, any boxes you want ticked). Refresh "
+                   "re-pulls your repo's template and discards edits.")
+        st.text_area("PR description", height=320, key="pr_body_box", label_visibility="collapsed")
+        if st.button("↻ Refresh from template", key="pr_body_refresh"):
+            try:
+                _t = pipeline.read_pr_template()
+                if not _t.strip():
+                    _t = pipeline.repo_pr_template()
+                ss["pr_body_box"] = _t or ""
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't re-read the template - {type(e).__name__}: {str(e)[:200]}")
     if st.button("Snapshot", type="primary"):
         _needs_pick = scope in ("Pick assets", "By tag", "By collection")
         if _needs_pick and not object_ids:
@@ -718,7 +738,7 @@ with tabs[1]:
                     ss["snap_result"] = pipeline.snapshot(source_org=src or None, from_seed=from_seed,
                                                           object_ids=object_ids or None,
                                                           include_dependencies=(not _needs_pick),
-                                                          pr_description=ss.get("pr_desc", ""),
+                                                          pr_body=ss.get("pr_body_box", ""),
                                                           progress=lambda m: _snap_status.write(m))
                     _snap_status.update(label="Snapshot complete", state="complete")
                     ss["snap_inputs"] = {"src": src, "from_seed": from_seed,
