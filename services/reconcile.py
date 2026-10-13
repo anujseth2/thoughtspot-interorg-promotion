@@ -24,13 +24,22 @@ from services.ts_client import api_metadata_type
 # accept the friendly TML names via api_metadata_type for robustness).
 _REST_TYPES = {"LOGICAL_TABLE", "LIVEBOARD", "ANSWER", "CONNECTION"}
 
+# import_tml reports liveboards and answers under their pre-v2 metadata names. These are NOT keys
+# in api_metadata_type (which is keyed on lowercase TML names), so without this map they fall
+# through to the LOGICAL_TABLE default: reconcile then searches logical tables for a liveboard,
+# finds neither the name nor the guid, and reports a false "missing" for an object that landed fine.
+_V1_TYPES = {"PINBOARD_ANSWER_BOOK": "LIVEBOARD", "QUESTION_ANSWER_BOOK": "ANSWER"}
+
 
 def _rest_type(t: str) -> str:
     """Normalise a promoted object's `type` to a REST metadata_type enum."""
     if not t:
         return "LOGICAL_TABLE"
-    if t.upper() in _REST_TYPES:
-        return t.upper()
+    up = t.upper()
+    if up in _REST_TYPES:
+        return up
+    if up in _V1_TYPES:
+        return _V1_TYPES[up]
     return api_metadata_type(t.lower())
 
 
