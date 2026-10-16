@@ -801,12 +801,32 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None, files=None)
     validate = ts.import_tml(strings, policy="VALIDATE_ONLY")
     errs = [r for r in validate if r["status"] != "OK"]
     if validate_only or errs:                        # gate: never import on a failed validate
+        findings = classify_import_errors(validate) if errs else []
+        _name_connections(ts, cfg, findings)
         return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
-                "findings": classify_import_errors(validate) if errs else [],
+                "findings": findings,
                 "imported": None, "blocked": bool(errs), "dropped": dropped}
     results = ts.import_tml(strings, policy="ALL_OR_NONE")
     return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
             "findings": [], "imported": results, "blocked": False, "dropped": dropped}
+
+
+def _name_connections(ts, cfg, findings) -> None:
+    """When validate says the target's connection doesn't exist, say which connection the target is
+    set to and list the ones the org actually has, so the fix is a pick rather than a hunt."""
+    hits = [f for f in findings if "connection this target is set to use" in (f.get("message") or "")]
+    if not hits:
+        return
+    try:
+        names = sorted(c.get("name", "") for c in ts._post("/api/rest/2.0/connection/search",
+                                                           {"record_size": -1}) or [])
+    except Exception:
+        names = []
+    extra = f" This target is set to '{cfg.get('connection') or '(none)'}'."
+    if names:
+        extra += " Connections in this org: " + ", ".join(names) + "."
+    for f in hits:
+        f["fix"] = (f.get("fix") or "") + extra
 
 
 def align_obj_id(org, current_obj_id: str, new_obj_id: str) -> dict:

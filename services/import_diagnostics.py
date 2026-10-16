@@ -67,6 +67,19 @@ def _clean(msg: str) -> str:
 # Plain-language translations for the generic (non-column) error shapes TS returns verbatim.
 # Each entry: (compiled pattern, lambda match -> (cause, fix)). First match wins.
 _ERROR_RULES = [
+    (re.compile(r"connection name specified in TML file exists", re.I),
+     lambda m: ("The connection this target is set to use doesn't exist in the target org.",
+                "In Setup, set this target's connection to one that exists in the target org "
+                "(names must match exactly), then re-run.")),
+    (re.compile(r"Database with name:\s*(\S+?)\s+does not exist in connection\s+(.+?)\.", re.I),
+     lambda m: (f"Database '{m.group(1)}' isn't in connection '{m.group(2)}'.",
+                "Check this target's database value (ts_db) in Setup. Names are matched exactly, "
+                "including upper/lower case.")),
+    (re.compile(r"External table with name:\s*(\S+?)\s+does not exist in connection\s+(.+?)\.", re.I),
+     lambda m: (f"Table '{m.group(1)}' isn't in connection '{m.group(2)}'.",
+                "Check this target's database/schema values in Setup and that the table exists in "
+                "the warehouse. Names are matched exactly, including upper/lower case (Databricks "
+                "names are usually lowercase).")),
     (re.compile(r"free trial has ended|warehouses? (?:have|has) been suspended|CONNECTION_CREATION_ERROR", re.I),
      lambda m: ("The target warehouse can't be reached — it looks paused or suspended "
                 "(e.g. a Snowflake trial that ended, or a stopped Databricks warehouse).",
@@ -76,6 +89,12 @@ _ERROR_RULES = [
      lambda m: ("ThoughtSpot couldn't read the connection's metadata.",
                 "Usually the warehouse is asleep/suspended or the connection lost its credential — "
                 "wake the warehouse or re-test the connection, then re-run.")),
+    (re.compile(r"Unable to import any viz", re.I),
+     lambda m: ("This liveboard's visuals depend on an object that failed above.",
+                "Fix the table/model errors listed above first; the liveboard will then validate.")),
+    (re.compile(r"No table with object_id\s+(\S+)\s+found", re.I),
+     lambda m: (f"This model references table '{m.group(1)}', which failed or isn't on the target.",
+                "Fix that table's error above (or deploy the table too); the model will then validate.")),
     (re.compile(r"10086|not authorized|permission|privilege|access denied", re.I),
      lambda m: ("Permission problem talking to the connection.",
                 "The deploy account needs access to the target connection (shared at edit/MODIFY) "
