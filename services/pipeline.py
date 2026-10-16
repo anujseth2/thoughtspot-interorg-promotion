@@ -42,6 +42,10 @@ def _manifest_path() -> str:
     b = _base()
     return f"{b}/variables/manifest.json" if b else "variables/manifest.json"
 
+def _last_promotion_path() -> str:
+    b = _base()
+    return f"{b}/variables/last_promotion.json" if b else "variables/last_promotion.json"
+
 PR_TEMPLATE_PATH = ROOT / "variables" / "pr_template.md"
 def read_pr_template() -> str:
     """The operator's PR description template. Stored LOCALLY and git-ignored: a customer's template
@@ -347,6 +351,14 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     _p("Writing variable manifest…")
     g.put_file(_manifest_path(), json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
+    _p("Recording this promotion's assets…")
+    # Record which release files THIS snapshot produced, so the Deploy tab can pre-select exactly
+    # them instead of making the operator pick the same assets a second time.
+    g.put_file(_last_promotion_path(),
+               json.dumps({"files": sorted(files),
+                           "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           "source_org": "seed" if from_seed else str(_src)}, indent=2),
+               "chore: record last promotion", branch=branch)
     # ADDITIVE by design: a snapshot adds/updates the files it produces and leaves every OTHER
     # module's release files untouched. (We used to prune files not in this snapshot for a "full
     # replace" - but that deletes other modules when you promote a subset, e.g. snapshotting only
@@ -652,6 +664,25 @@ def preflight_connection(target: str) -> dict:
             "findings": findings, "drop_tokens": sorted(set(drop_tokens))}
 
 
+def last_promotion() -> dict:
+    """The file list the most recent snapshot produced ({files, at, source_org}), or {} if none is
+    recorded. Reads the release branch, then the base branch (after the release PR is merged)."""
+    g = git()
+    refs = [_branch()] + ([g.main] if _branch() and _branch() != g.main else [])
+    for ref in refs:
+        try:
+            raw = g.read_file(_last_promotion_path(), ref=ref)
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                data = json.loads(raw)
+                return data if isinstance(data, dict) and data.get("files") else {}
+            except ValueError:
+                return {}
+    return {}
+
+
 def pending_for_target(target: str) -> list:
     """Classify every release/ asset against the TARGET org, read LIVE from the cluster (no stored
     deploy state). Per asset:
@@ -771,12 +802,32 @@ def deploy(target: str, validate_only: bool = False, drop_cols=None, files=None)
     validate = ts.import_tml(strings, policy="VALIDATE_ONLY")
     errs = [r for r in validate if r["status"] != "OK"]
     if validate_only or errs:                        # gate: never import on a failed validate
+        findings = classify_import_errors(validate) if errs else []
+        _name_connections(ts, cfg, findings)
         return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
-                "findings": classify_import_errors(validate) if errs else [],
+                "findings": findings,
                 "imported": None, "blocked": bool(errs), "dropped": dropped}
     results = ts.import_tml(strings, policy="ALL_OR_NONE")
     return {"target": target, "org": str(cfg["org_id"]), "validate": validate,
             "findings": [], "imported": results, "blocked": False, "dropped": dropped}
+
+
+def _name_connections(ts, cfg, findings) -> None:
+    """When validate says the target's connection doesn't exist, say which connection the target is
+    set to and list the ones the org actually has, so the fix is a pick rather than a hunt."""
+    hits = [f for f in findings if "connection this target is set to use" in (f.get("message") or "")]
+    if not hits:
+        return
+    try:
+        names = sorted(c.get("name", "") for c in ts._post("/api/rest/2.0/connection/search",
+                                                           {"record_size": -1}) or [])
+    except Exception:
+        names = []
+    extra = f" This target is set to '{cfg.get('connection') or '(none)'}'."
+    if names:
+        extra += " Connections in this org: " + ", ".join(names) + "."
+    for f in hits:
+        f["fix"] = (f.get("fix") or "") + extra
 
 
 def align_obj_id(org, current_obj_id: str, new_obj_id: str) -> dict:

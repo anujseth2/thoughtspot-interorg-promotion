@@ -134,7 +134,11 @@ class AreaGitRepo:
     def open_pr(self, head_branch: str, title: str, body: str) -> str:
         head = f"{self._repo.owner.login}:{head_branch}"   # GitHub's head filter needs owner:branch
         for pr in self._repo.get_pulls(state="open", base=self.main, head=head):
-            return pr.html_url  # reuse the already-open PR for this branch
+            # reuse the already-open PR for this branch; the snapshot reset the branch to its own
+            # content, so the description must follow it too (else this promotion's is dropped)
+            if body and pr.body != body:
+                pr.edit(body=body)
+            return pr.html_url
         pr = self._repo.create_pull(title=title, body=body,
                                     head=head_branch, base=self.main)
         return pr.html_url
