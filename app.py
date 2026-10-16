@@ -818,7 +818,8 @@ with tabs[3]:
     st.subheader("Deploy release to a target org")
     st.write("The release folder keeps everything ever promoted. Each asset is checked **live against "
              "the target** by obj_id, so you can see what would be created vs updated in place. Pick "
-             "the assets, validate, then deploy the confirmed set atomically (all or none). Never deletes.")
+             "the assets once (the latest snapshot's are pre-selected), validate, then deploy that same set "
+             "atomically (all or none). Never deletes.")
     targets = pipeline._targets()
     if not targets:
         st.warning("No targets configured - add them in the Setup tab.")
@@ -838,6 +839,7 @@ with tabs[3]:
                 try:
                     ss["pending"] = pipeline.pending_for_target(tgt)
                     ss["release_files"] = pipeline._read_release_files()  # cached for dep expansion
+                    ss["last_promo"] = pipeline.last_promotion()            # seeds the selection
                     ss.pop("pending_err", None)
                 except Exception as e:
                     ss["pending"] = []
@@ -868,21 +870,35 @@ with tabs[3]:
         else:
             n_new = sum(1 for r in pending if r["status"] == "new")
             n_dup = sum(1 for r in pending if r["status"] == "would_duplicate")
-            st.caption(f"{n_new} asset(s) not yet in **{targets[tgt].get('name', tgt)}** "
-                       f"(of {len(pending)} in the release), checked live by obj_id. Only those are ticked "
-                       "by default; assets already in the target are not (re-tick one to push an update). "
-                       "Untick anything the target can't take yet (e.g. a module whose warehouse tables "
-                       "aren't built).")
+            # Pre-select what the latest snapshot produced, so the operator picks assets ONCE (on the
+            # Snapshot tab) rather than again here. Without a recorded snapshot, fall back to the
+            # assets the target doesn't have yet.
+            _files = {r["file"] for r in pending}
+            _lp = ss.get("last_promo") or {}
+            _lp_files = [f for f in (_lp.get("files") or []) if f in _files]
+            if _lp_files:
+                st.caption(f"Pre-selected the **{len(_lp_files)}** asset(s) from the latest snapshot "
+                           f"({(_lp.get('at') or '').replace('T', ' ').rstrip('Z')} UTC). The release holds "
+                           f"{len(pending)} in total; {n_new} of them are not yet in "
+                           f"**{targets[tgt].get('name', tgt)}**. Tick or untick to change the set.")
+            else:
+                st.caption(f"{n_new} asset(s) not yet in **{targets[tgt].get('name', tgt)}** "
+                           f"(of {len(pending)} in the release), checked live by obj_id. Only those are "
+                           "ticked by default; assets already in the target are not (re-tick one to push "
+                           "an update). Untick anything the target can't take yet (e.g. a module whose "
+                           "warehouse tables aren't built).")
             if n_dup:
                 st.warning(f"{n_dup} asset(s) exist in the target under a DIFFERENT obj_id - importing "
                            "would create duplicates. Align the obj_id on the selection view before "
                            "snapshotting, rather than deploying these as-is.")
             # Selection lives in session state (a set of filenames) so searching/filtering NEVER
-            # loses ticks - only the rows on screen are written back. Seeded with what the target
-            # doesn't have yet; reseeded whenever the pending list is recomputed.
+            # loses ticks - only the rows on screen are written back. Seeded with the latest
+            # snapshot's assets (else what the target doesn't have yet); reseeded whenever the
+            # pending list is recomputed.
             sel_key = f"dep_sel_{tgt}"
             if sel_key not in ss:
-                ss[sel_key] = {r["file"] for r in pending if r["status"] == "new"}
+                ss[sel_key] = (set(_lp_files) if _lp_files
+                               else {r["file"] for r in pending if r["status"] == "new"})
 
             f1, f2, f3 = st.columns([3, 2, 2])
             q = f1.text_input("Search", value="", key=f"dep_q_{tgt}",
@@ -968,16 +984,6 @@ with tabs[3]:
                 ss["deploy_files"] = expanded
                 if not ss["deploy_result"].get("blocked"):
                     ss.pop("pending_tgt", None)       # deployed -> re-check against the target
-
-        with st.expander("Advanced: deploy the entire release folder (legacy whole-folder path)"):
-            _wf_only = st.checkbox("Validate only (no import)", value=True, key="wf_only")
-            if st.button(f"{'Validate' if _wf_only else 'Deploy'} entire folder → {tgt}"):
-                with st.spinner("Validating + deploying the whole release/…"):
-                    ss["deploy_result"] = pipeline.deploy(tgt, validate_only=_wf_only)
-                ss["deploy_tgt"] = tgt
-                ss["deploy_files"] = None
-                if not _wf_only and not ss["deploy_result"].get("blocked"):
-                    ss.pop("pending_tgt", None)
 
         r = ss.get("deploy_result")
         if r and ss.get("deploy_tgt") == tgt:
