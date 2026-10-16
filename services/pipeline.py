@@ -351,6 +351,7 @@ def snapshot(source_org=None, tag=None, from_seed=False, object_ids=None,
     _p("Writing variable manifest…")
     g.put_file(_manifest_path(), json.dumps(sorted(used), indent=2),
                "chore: variable manifest", branch=branch)
+    _p("Recording this promotion's assets…")
     # Record which release files THIS snapshot produced, so the Deploy tab can pre-select exactly
     # them instead of making the operator pick the same assets a second time.
     g.put_file(_last_promotion_path(),

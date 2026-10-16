@@ -866,7 +866,9 @@ with tabs[3]:
                "worksheet": "Model", "answer": "Answer", "liveboard": "Liveboard"}
         selected = []
         if not pending:
-            st.info("Nothing in `release/` yet — run a snapshot first.")
+            # only once the target has been checked - before that "pending" is just not loaded yet
+            if ss.get("pending_tgt") == tgt and not ss.get("pending_err"):
+                st.info("Nothing in `release/` yet — run a snapshot first.")
         else:
             n_new = sum(1 for r in pending if r["status"] == "new")
             n_dup = sum(1 for r in pending if r["status"] == "would_duplicate")
@@ -976,12 +978,14 @@ with tabs[3]:
                     ss["deploy_result"] = pipeline.deploy(tgt, validate_only=True, files=expanded)
                 ss["deploy_tgt"] = tgt
                 ss["deploy_files"] = expanded
+                ss["deploy_pre"] = {p["name"]: p["status"] for p in pending}
             if c2.button(f"Deploy selection ({len(expanded)}) — atomic", type="primary",
                          disabled=not expanded):
                 with st.spinner("Validating + importing the selected set + dependencies (all or none)…"):
                     ss["deploy_result"] = pipeline.deploy(tgt, validate_only=False, files=expanded)
                 ss["deploy_tgt"] = tgt
                 ss["deploy_files"] = expanded
+                ss["deploy_pre"] = {p["name"]: p["status"] for p in pending}
                 if not ss["deploy_result"].get("blocked"):
                     ss.pop("pending_tgt", None)       # deployed -> re-check against the target
 
@@ -1012,13 +1016,19 @@ with tabs[3]:
                             ss["deploy_result"] = pipeline.deploy(
                                 tgt, validate_only=False, drop_cols=dropcols,
                                 files=ss.get("deploy_files"))
+                        ss["deploy_pre"] = {p["name"]: p["status"] for p in pending}
                         if not ss["deploy_result"].get("blocked"):
                             ss.pop("pending_tgt", None)
                         st.rerun()
 
             if r.get("blocked"):
-                st.error("Validate failed - nothing imported. Untick the flagged asset(s) above, or "
-                         "build their tables in the target warehouse, then retry.")
+                if any("connection this target is set to use" in (f.get("message") or "")
+                       for f in (r.get("findings") or [])):
+                    st.error("Validate failed - nothing imported. Fix this target's connection in "
+                             "Setup, then retry.")
+                else:
+                    st.error("Validate failed - nothing imported. Untick the flagged asset(s) above, "
+                             "or build their tables in the target warehouse, then retry.")
             elif r.get("imported") is None:
                 st.success("Validation passed. Use **Deploy selection** to import the confirmed set "
                            "atomically.")
@@ -1026,7 +1036,8 @@ with tabs[3]:
                 # Say plainly whether each object was CREATED with a new id or UPDATED in place,
                 # using the pre-deploy obj_id verdict, so a new id is never just an unexplained
                 # warning. Matched by name (release filenames are collision-guarded).
-                _pre = {p["name"]: p["status"] for p in (ss.get("pending") or [])}
+                # statuses captured when this deploy ran, not the current (possibly refreshed) list
+                _pre = ss.get("deploy_pre") or {}
                 _out = {"new": "🆕 created new", "in_place": "✅ updated in place",
                         "would_duplicate": "⚠️ created as DUPLICATE"}
                 _rows = [{"outcome": _out.get(_pre.get(v["name"]), "—") if v["status"] == "OK" else "",
@@ -1056,8 +1067,12 @@ with tabs[3]:
                         st.warning(f"Reconcile skipped - {type(e).__name__}: {str(e)[:160]}")
                 if rec is not None:
                     st.write("**Reconciliation (live target truth):**")
-                    st.table([{"verdict": f["verdict"], "type": f["type"],
-                               "name": f["name"], "detail": f.get("detail", "")} for f in rec])
+                    # reconcile can only see that the returned id is present; an in-place update
+                    # returns the existing id, so use the pre-deploy status to call it an update
+                    st.table([{"verdict": ("updated in place" if f["verdict"] == "created"
+                                           and _pre.get(f["name"]) == "in_place" else f["verdict"]),
+                               "type": f["type"], "name": f["name"],
+                               "detail": f.get("detail", "")} for f in rec])
                     bad = [f for f in rec if f["verdict"] in ("duplicate", "missing")]
                     if bad:
                         st.error(f"{len(bad)} object(s) did not reconcile cleanly: "
