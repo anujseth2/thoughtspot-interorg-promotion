@@ -283,8 +283,15 @@ def write_config(cfg: dict, orgs_config: dict):
                    if "source" in (r.get("role") or [])), str(cfg.get("source_org", "")))
     env = env_values(cfg)
     env["TS_ORG_SOURCE"] = str(source)
+    # Live for this session, matching what a fresh launch from the saved .env would see: a key
+    # with no value is UNSET, not set to "". An empty string would block every
+    # os.environ.get(k, default) and any fallback that only fills unset keys, for the rest of
+    # the session. Unsetting still clears a credential the new config no longer uses.
     for k in ENV_KEYS:
-        os.environ[k] = env.get(k, "") or ""           # live for this session
+        if env.get(k):
+            os.environ[k] = env[k]
+        else:
+            os.environ.pop(k, None)
     lines = [f"{k}={env[k]}" for k in ENV_KEYS if env.get(k)]  # only persist the set ones
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
     ORGS_PATH.parent.mkdir(parents=True, exist_ok=True)
