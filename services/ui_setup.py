@@ -3,7 +3,7 @@ connections (so you pick from real values instead of guessing ids/db/schema), an
 everything to .env + variables/orgs.json. Lets the whole tool be configured in the UI
 with no hand-editing of files - which is where setup pain usually lives.
 
-orgs.json holds the per-org info in one place: each org's role (source / variables /
+orgs.json holds the per-org info in one place: each org's role (source /
 target) and - for targets - the connection and database/schema. The env file holds the
 cluster host + the one primary credential, which is used for every org.
 """
@@ -11,7 +11,8 @@ import json
 import os
 from pathlib import Path
 
-from services.ts_client import TSClient, bearer_only, bearer_token_org
+from services.ts_client import (TSClient, bearer_only, bearer_token_org, ts_error_code,
+                                PRIMARY_ORG, NOT_ORG_MEMBER)
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT / ".env"
@@ -22,7 +23,7 @@ TARGETS_PATH = ROOT / "variables" / "targets.json"   # legacy, migrated on first
 # per-org credentials live in orgs.json, not here.
 ENV_KEYS = ["TS_HOST", "TS_USER", "TS_PASSWORD", "TS_TOKEN", "TS_TOKEN_TARGET", "TS_SECRET_KEY",
             "TS_CA_BUNDLE", "TS_VERIFY_SSL",
-            "TS_ORG_PRIMARY", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
+            "TS_CONNECT_ORG", "TS_ORG_SOURCE", "TS_RELEASE_TAG", "TS_RESOLVE_LOCAL",
             "GIT_LOCAL_DIR", "GITHUB_REPO", "GITHUB_TOKEN", "GIT_BRANCH", "GIT_BASE_BRANCH",
             "GITHUB_API_URL", "GIT_BASE_PATH"]
 
@@ -80,9 +81,43 @@ def make_client(cfg: dict, org_id="", match_org: bool = False) -> TSClient:
                     verify=_verify_from_cfg(cfg))
 
 
+class NotInConnectOrg(RuntimeError):
+    """The credential's user is not a member of the org Setup connects through (the Primary
+    org unless one was entered), so ThoughtSpot refused the token. The UI then asks for an org
+    the user does belong to."""
+
+
+def _connect_org(cfg: dict) -> str:
+    return str(cfg.get("connect_org") or PRIMARY_ORG).strip() or PRIMARY_ORG
+
+
+def _connect_client(cfg: dict) -> TSClient:
+    """A client for the org Setup connects through. Raises NotInConnectOrg when the user isn't a
+    member of it; any other failure (wrong secret, unknown user, network) propagates as is."""
+    org = _connect_org(cfg)
+    try:
+        return make_client(cfg, org)
+    except Exception as e:
+        code = ts_error_code(e)
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        where = "the Primary org" if org == PRIMARY_ORG else f"org {org}"
+        if code == NOT_ORG_MEMBER:
+            raise NotInConnectOrg(
+                f"This user isn't a member of {where}, so ThoughtSpot refused a token for it. "
+                "Enter the id of an org the user does belong to (the source org works) and "
+                "connect again.") from e
+        if status == 401 and cfg.get("password") and not cfg.get("secret"):
+            # session login answers 401 both for a wrong password and for a non-member org
+            raise NotInConnectOrg(
+                f"Login to {where} failed. Check the username and password; if they are right, "
+                f"the user may not be a member of {where}, so enter an org it does belong to "
+                "and connect again.") from e
+        raise
+
+
 def list_orgs(cfg: dict):
-    """[(id, name)] for every org. Connects to the primary org with the one credential."""
-    c = make_client(cfg, cfg.get("primary_org", "0"))
+    """[(id, name)] for every org, read through the connect org."""
+    c = _connect_client(cfg)
     data = c._post("/api/rest/2.0/orgs/search", {})
     orgs = data if isinstance(data, list) else data.get("orgs", [])
     return [(str(o.get("id")), o.get("name")) for o in orgs]
@@ -95,7 +130,7 @@ def connect(cfg: dict):
     orgs/search requires ORG_ADMINISTRATION, so a non-admin gets a 403 there even though they
     can still operate in the orgs they belong to - in that case we return ([], note) so the UI
     can fall back to manual org-ID entry. Promotion does NOT need org-admin."""
-    c = make_client(cfg, cfg.get("primary_org", "0"))   # token mint = credential check
+    c = _connect_client(cfg)                             # token mint = credential check
     # 1) admin path: orgs/search lists every org on the cluster
     try:
         data = c._post("/api/rest/2.0/orgs/search", {})
@@ -180,7 +215,7 @@ def env_values(cfg: dict) -> dict:
         "TS_SECRET_KEY": cfg.get("secret", ""),
         "TS_CA_BUNDLE": cfg.get("ca_bundle", ""),
         "TS_VERIFY_SSL": "" if cfg.get("verify_ssl", True) else "false",
-        "TS_ORG_PRIMARY": str(cfg.get("primary_org", "0")),
+        "TS_CONNECT_ORG": "" if _connect_org(cfg) == PRIMARY_ORG else _connect_org(cfg),
         "TS_ORG_SOURCE": str(cfg.get("source_org", "")),
         "TS_RELEASE_TAG": cfg.get("tag", ""),
         "TS_RESOLVE_LOCAL": "1" if cfg.get("resolve_local") else "",
@@ -196,14 +231,11 @@ def env_values(cfg: dict) -> dict:
 
 def write_config(cfg: dict, orgs_config: dict):
     """Apply config to the running process (os.environ, picked up by the pipeline on the
-    next call) and persist it to .env + variables/orgs.json. The primary (variables) and
-    source orgs are derived from the roles in orgs_config. Returns the two paths."""
-    primary = next((oid for oid, r in orgs_config.items()
-                    if "variables" in (r.get("role") or [])), str(cfg.get("primary_org", "0")))
+    next call) and persist it to .env + variables/orgs.json. The source org is derived from
+    the roles in orgs_config. Returns the two paths."""
     source = next((oid for oid, r in orgs_config.items()
                    if "source" in (r.get("role") or [])), str(cfg.get("source_org", "")))
     env = env_values(cfg)
-    env["TS_ORG_PRIMARY"] = str(primary)
     env["TS_ORG_SOURCE"] = str(source)
     for k in ENV_KEYS:
         os.environ[k] = env.get(k, "") or ""           # live for this session

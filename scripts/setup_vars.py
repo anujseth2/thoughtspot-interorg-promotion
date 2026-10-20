@@ -3,7 +3,7 @@ values, reading variables/targets.json.
 
 Usage:  python scripts/setup_vars.py [variables/targets.json]
 
-Variables are managed from the Primary org (TS_ORG_PRIMARY) by an admin.
+Variables are managed from the Primary org (always org 0) by an admin.
 """
 import json
 import sys

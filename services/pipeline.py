@@ -8,7 +8,7 @@ Verbs (one shared engine for the CLI):
   deploy      read `release/` from Git and import it into a target org. obj_id is the
               cross-org identity; the org's variable values resolve the ${...} tokens.
 
-Variables are managed from the Primary org (TS_ORG_PRIMARY, default 0).
+Variables are managed from the Primary org (always org 0).
 """
 import json
 import os
@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 import config as C
-from services.ts_client import TSClient, bearer_only, bearer_token_org
+from services.ts_client import TSClient, bearer_only, bearer_token_org, PRIMARY_ORG
 from services.param_transform import (load_tml, parameterize_bundle, tml_type,
                                        retarget_connection, source_bindings, TABLE_TYPES)
 from services import variables as V
@@ -129,7 +129,7 @@ def _auth(role: str = "source"):
 
 def _orgs_config() -> dict:
     """Per-org config from variables/orgs.json: {org_id: {name, role, connection, values}}.
-    {} if the file is absent. role is a list of source/variables/target. No credentials
+    {} if the file is absent. role is a list of source/target. No credentials
     here - the one credential above is used for every org."""
     p = ROOT / "variables" / "orgs.json"
     try:
@@ -151,16 +151,14 @@ def _verify():
 
 
 def _primary_org() -> str:
-    """Org that manages the variables: the org tagged role 'variables' in orgs.json,
-    else TS_ORG_PRIMARY (default 0)."""
-    for oid, rec in _orgs_config().items():
-        if "variables" in (rec.get("role") or []):
-            return str(oid)
-    return os.environ.get("TS_ORG_PRIMARY", "0")
+    """Org that manages the variables. Always the Primary org (id 0): ThoughtSpot only lets the
+    Primary org manage Variables, and a tenant org gets a 403."""
+    return PRIMARY_ORG
 
 
 def primary_client() -> TSClient:
-    return TSClient(host=os.environ["TS_HOST"], org_id=_primary_org(), verify=_verify(), **_auth())
+    # through org_client so a bearer token from another org is refused with a clear message
+    return org_client(_primary_org())
 
 
 def org_client(org, role: str = "source") -> TSClient:
