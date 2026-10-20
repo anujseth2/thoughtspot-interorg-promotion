@@ -158,24 +158,70 @@ def list_connections(cfg: dict, org_id):
     return [(it.get("metadata_id"), it.get("metadata_name")) for it in items]
 
 
-def fetch_databases(cfg: dict, org_id, conn_identifier):
-    """Best-effort list of databases on a connection (to auto-fill ts_db). May come back
-    empty for connections this session can't introspect (e.g. OAuth/per-principal warehouses);
-    in that case type the database name (you can read it from the connection's Edit page)."""
+# connection/search returns no warehouse objects unless it is told the connection's own auth type
+# (a Databricks PAT connection answers SERVICE_ACCOUNT with nothing). Read it off the connection's
+# stored configuration, and fall back across the valid types if that guess comes back empty.
+_AUTH_FALLBACKS = ("SERVICE_ACCOUNT", "PERSONAL_ACCESS_TOKEN", "OAUTH_WITH_SERVICE_PRINCIPAL",
+                   "OAUTH_WITH_PKCE")
+
+
+def _connection_auth(c: TSClient, conn_identifier) -> str:
+    """The connection's own auth type, inferred from its stored configuration keys, or ""."""
     try:
-        c = make_client(cfg, org_id, match_org=True)
-        data = c._post("/api/rest/2.0/connection/search",
-                       {"connections": [{"identifier": conn_identifier}],
-                        "data_warehouse_object_type": "DATABASE", "record_size": -1})
-        conns = data if isinstance(data, list) else data.get("connections", data.get("connection", []))
-        dbs = []
-        for cc in conns:
-            for db in (cc.get("data_warehouse_objects") or {}).get("databases", []) or []:
-                if db.get("name"):
-                    dbs.append(db["name"])
-        return dbs
+        rows = c._post("/api/rest/2.0/connection/search",
+                       {"connections": [{"identifier": conn_identifier}], "include_details": True,
+                        "record_size": -1})
     except Exception:
-        return []
+        return ""
+    rows = rows if isinstance(rows, list) else rows.get("connection", [])
+    conf = ((rows[0].get("details") or {}).get("configuration") if rows else None) or {}
+    if isinstance(conf, str):
+        try:
+            conf = json.loads(conf)
+        except ValueError:
+            conf = {}
+    keys = set(conf)
+    if "personal_access_token" in keys:
+        return "PERSONAL_ACCESS_TOKEN"
+    if keys & {"oauth_client_id", "oauth_client_secret"}:
+        return "OAUTH_WITH_SERVICE_PRINCIPAL"
+    if {"user", "password"} <= keys:
+        return "SERVICE_ACCOUNT"
+    return ""
+
+
+def list_warehouse_objects(cfg: dict, org_id, conn_identifier, kind: str, database: str = "",
+                           auth_hint: str = ""):
+    """Names of the DATABASEs on a connection, or the SCHEMAs in one of its databases, read
+    through ThoughtSpot (it uses the connection's stored credential; no warehouse secret here).
+
+    Returns (names, auth_type_that_worked). ([], "") when nothing comes back, which happens for a
+    cold warehouse, a missing permission, or a per-user OAuth connection; the UI then falls back
+    to typing. Pass auth_hint (the type that worked for the databases) to skip re-probing."""
+    c = make_client(cfg, org_id, match_org=True)
+    first = auth_hint or _connection_auth(c, conn_identifier)
+    tries = [a for a in (first,) + _AUTH_FALLBACKS if a]
+    tries = list(dict.fromkeys(tries))
+    for auth in tries:
+        body = {"connections": [{"identifier": conn_identifier}], "data_warehouse_object_type": kind,
+                "authentication_type": auth, "record_size": -1}
+        if kind == "SCHEMA":
+            body["connections"][0]["data_warehouse_objects"] = [{"database": database}]
+        try:
+            rows = c._post("/api/rest/2.0/connection/search", body)
+        except Exception:
+            continue                                    # this auth type isn't valid here; try the next
+        rows = rows if isinstance(rows, list) else rows.get("connections", rows.get("connection", []))
+        dbs = [d for r in rows for d in ((r.get("data_warehouse_objects") or {}).get("databases") or [])]
+        if kind == "DATABASE":
+            names = [d.get("name") for d in dbs]
+        else:
+            names = [sc.get("name") for d in dbs if d.get("name") in ("", None, database)
+                     for sc in (d.get("schemas") or [])]
+        names = sorted({n for n in names if n})
+        if names:
+            return names, auth
+    return [], ""
 
 
 def load_orgs_config() -> dict:
