@@ -8,7 +8,7 @@ be copied into this project.
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 import config as C
 from services.param_transform import tml_type
@@ -29,8 +29,9 @@ def github_repo() -> str:
 def github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN")
     if not token and _MIGRATION_ENV.exists():
-        load_dotenv(_MIGRATION_ENV)             # pull token from the migration POC
-        token = os.environ.get("GITHUB_TOKEN")
+        # Read just the token from the migration POC's .env. Loading the whole file would copy
+        # its other keys (TS_HOST, TS_PASSWORD, GITHUB_REPO, ...) into this tool's session.
+        token = (dotenv_values(_MIGRATION_ENV).get("GITHUB_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("No GitHub token configured. In Setup, set the GitHub token alongside the "
                            "repo and click 'Save configuration' (or use a local folder store instead).")
