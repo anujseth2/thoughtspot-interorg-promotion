@@ -326,6 +326,12 @@ with tabs[0]:
                 st.warning(f"Connected, but {note}.")
             else:
                 st.success(f"Connected. Loaded {len(orgs)} orgs. Step 2 is unlocked below.")
+            try:
+                for _label, _oid, _name in ui_setup.bearer_token_orgs(_cfg()):
+                    st.info(f"The {_label} bearer token is bound to **{_name}** ({_oid}) "
+                            "and only reaches that org.")
+            except Exception as _e:
+                st.warning(f"Couldn't read which org each bearer token belongs to - {str(_e)[:160]}")
         except Exception as e:
             ss.pop("connected", None); ss.pop("orgs", None)
             st.error(f"Connection failed - {type(e).__name__}: {str(e)[:300]}")
@@ -428,13 +434,18 @@ with tabs[0]:
         st.divider()
         st.markdown("### Step 2 - Orgs in this promotion")
         st.caption("Pick every org involved, then set each one's role and - for targets - the "
-                   "connection + db/schema. All orgs use the Step 1 primary credential.")
+                   "connection + db/schema. All orgs use the Step 1 credential; with bearer "
+                   "tokens, the source and target tokens each reach only their own org.")
 
         participating = st.multiselect(
             "Orgs involved", ids, default=[o for o in ids if o in ss["orgs_cfg"]],
             format_func=lambda i: f"{id2name.get(i, i)}  ({i})", key="participating")
 
         new_cfg = {}
+        try:
+            _tok_orgs = {_l: (_o, _n) for _l, _o, _n in ui_setup.bearer_token_orgs(_cfg())}
+        except Exception:
+            _tok_orgs = {}
         for oid in participating:
             prev = ss["orgs_cfg"].get(oid, {})
             with st.expander(f"{id2name.get(oid, oid)}  ({oid})", expanded=True):
@@ -443,6 +454,17 @@ with tabs[0]:
                     key=f"role_{oid}",
                     help="source = snapshot FROM;  variables = manages the TABLE_MAPPING "
                          "variables (the Primary org);  target = deploy TO")
+                # Bearer tokens are bound to one org each: flag a role whose token is elsewhere,
+                # since the snapshot / deploy for it would be refused (pipeline._require_bearer_org).
+                for _r, _verb in (("source", "snapshot from"), ("target", "deploy to")):
+                    _tok = _tok_orgs.get(_r) or (_tok_orgs.get("source") if _r == "target" else None)
+                    if _r in roles and _tok and _tok[0] != str(oid):
+                        _why = ("No target token is set, so the source token would be used, and it"
+                                if _r == "target" and "target" not in _tok_orgs
+                                else f"The {_r} bearer token")
+                        st.warning(f"{_why} belongs to **{_tok[1]}** ({_tok[0]}), not this org, so "
+                                   f"the tool will refuse to {_verb} it. Generate the {_r} token "
+                                   "while signed in to this org, or use a secret key.")
                 conn_name = prev.get("connection", "")
                 vals = prev.get("values", {}) or {}
                 ts_db, ts_schema, conn_id = vals.get("ts_db", ""), vals.get("ts_schema", ""), None
@@ -454,7 +476,7 @@ with tabs[0]:
                             try:
                                 ss.setdefault("conns", {})[oid] = ui_setup.list_connections(_cfg(), oid)
                             except Exception as e:
-                                st.error(f"Couldn't list connections - {str(e)[:200]}")
+                                st.error(f"Couldn't list connections - {str(e)[:400]}")
                     conns = ss.get("conns", {}).get(oid, [])
                     with b1:
                         if conns:
