@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 import config as C
-from services.ts_client import TSClient
+from services.ts_client import TSClient, bearer_only, bearer_token_org
 from services.param_transform import (load_tml, parameterize_bundle, tml_type,
                                        retarget_connection, source_bindings, TABLE_TYPES)
 from services import variables as V
@@ -164,7 +164,28 @@ def primary_client() -> TSClient:
 
 
 def org_client(org, role: str = "source") -> TSClient:
-    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **_auth(role))
+    auth = _auth(role)
+    if bearer_only(**auth):
+        _require_bearer_org(auth["token"], org, role)
+    return TSClient(host=os.environ["TS_HOST"], org_id=str(org), verify=_verify(), **auth)
+
+
+def _require_bearer_org(token: str, org, role: str) -> None:
+    """Refuse a bearer token that is bound to a different org than `org`.
+
+    Bearer tokens ignore org_id, so without this check a token generated in the wrong org would
+    snapshot from, or deploy into, that org with no error at all. A secret key or a username +
+    password is scoped per org_id, so only the bearer case needs it."""
+    tok_org, tok_name = bearer_token_org(os.environ["TS_HOST"], token, _verify())
+    if tok_org == str(org):
+        return
+    fallback = role == "target" and not os.environ.get("TS_TOKEN_TARGET", "").strip()
+    which = "No target bearer token is set, so the source token was used, and it" if fallback \
+        else f"The {role} bearer token"
+    raise RuntimeError(
+        f"{which} belongs to org {tok_name} ({tok_org}), not org {org}. Bearer tokens only reach "
+        f"the org they were generated in: generate the {role} token while signed in to org {org}, "
+        "or use a trusted-auth secret key.")
 
 
 def _log(msg: str) -> None:

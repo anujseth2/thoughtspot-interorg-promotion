@@ -6,13 +6,41 @@ Wraps metadata search, TML export, and TML import.
 from datetime import datetime
 
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 
 METADATA_TYPES = ["LOGICAL_TABLE", "LIVEBOARD", "ANSWER"]
 
 # subtype that identifies Models (formerly Worksheets)
 MODEL_SUBTYPE = "PRIVATE_WORKSHEET"
+
+
+def bearer_only(username: str = "", password: str = "", token: str = "",
+                secret_key: str = "") -> bool:
+    """True when TSClient would authenticate with the pre-minted token alone. Mirrors the
+    precedence in TSClient.__init__: secret + username, then username + password, then token."""
+    return bool(token) and not (secret_key and username) and not (username and password)
+
+
+_BEARER_ORG_CACHE: Dict[str, Tuple[str, str]] = {}
+
+
+def bearer_token_org(host: str, token: str, verify=True) -> Tuple[str, str]:
+    """(org_id, org_name) that a bearer token is bound to, read from auth/session/user.
+
+    A bearer token is minted inside one org and stays bound to it: TSClient ignores `org_id`
+    when it authenticates with one, so every call lands in the token's org whatever org the
+    caller meant. Callers use this to confirm a token belongs to the org they are about to read
+    from or write to. Cached per token for the life of the process."""
+    key = f"{host.rstrip('/')}|{token}"
+    if key not in _BEARER_ORG_CACHE:
+        resp = requests.get(f"{host.rstrip('/')}/api/rest/2.0/auth/session/user",
+                            headers={"Authorization": f"Bearer {token}"},
+                            verify=verify, timeout=60)
+        resp.raise_for_status()
+        org = resp.json().get("current_org") or {}
+        _BEARER_ORG_CACHE[key] = (str(org.get("id", "")), org.get("name", "") or "")
+    return _BEARER_ORG_CACHE[key]
 
 
 class TSClient:

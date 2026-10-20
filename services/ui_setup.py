@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from services.ts_client import TSClient
+from services.ts_client import TSClient, bearer_only, bearer_token_org
 
 ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT / ".env"
@@ -34,12 +34,49 @@ def _verify_from_cfg(cfg: dict):
     return False if cfg.get("verify_ssl", True) is False else True
 
 
-def make_client(cfg: dict, org_id="") -> TSClient:
-    """A client for `org_id`, built from the one primary credential in `cfg`. That
-    credential reaches every org (a token is minted per org_id at connect time)."""
+def _is_bearer(cfg: dict) -> bool:
+    return bearer_only(cfg.get("user", ""), cfg.get("password", ""),
+                       cfg.get("token", ""), cfg.get("secret", ""))
+
+
+def bearer_token_orgs(cfg: dict):
+    """[(label, org_id, org_name)] for each bearer token in `cfg` (source, then target).
+    Empty unless the credential is bearer tokens."""
+    if not _is_bearer(cfg):
+        return []
+    out = []
+    for label, tok in (("source", cfg.get("token", "")), ("target", cfg.get("target_token", ""))):
+        if tok:
+            oid, name = bearer_token_org(cfg["host"], tok, _verify_from_cfg(cfg))
+            out.append((label, oid, name))
+    return out
+
+
+def _bearer_for_org(cfg: dict, org_id) -> str:
+    """The bearer token in `cfg` that is bound to `org_id`. Raises, naming each token's org,
+    when neither is: a token cannot be pointed at another org."""
+    found = bearer_token_orgs(cfg)
+    for label, oid, _ in found:
+        if oid == str(org_id):
+            return cfg.get("token" if label == "source" else "target_token", "")
+    seen = "; ".join(f"the {label} token belongs to {name} ({oid})" for label, oid, name in found)
+    raise RuntimeError(f"No bearer token here is bound to org {org_id} ({seen}). Bearer tokens "
+                       "only reach the org they were generated in, so generate one while signed "
+                       "in to that org, or use a trusted-auth secret key.")
+
+
+def make_client(cfg: dict, org_id="", match_org: bool = False) -> TSClient:
+    """A client for `org_id`, built from the primary credential in `cfg`. A secret key or a
+    username + password reaches every org (a token is minted, or a session opened, per org_id).
+    Bearer tokens are bound to the org they were generated in and ignore org_id, so for a
+    lookup inside a specific org (match_org=True) use whichever of the source / target tokens
+    belongs to that org, and refuse if neither does."""
+    token = cfg.get("token", "")
+    if match_org and _is_bearer(cfg):
+        token = _bearer_for_org(cfg, org_id)
     return TSClient(host=cfg["host"], org_id=str(org_id),
                     username=cfg.get("user", ""), password=cfg.get("password", ""),
-                    token=cfg.get("token", ""), secret_key=cfg.get("secret", ""),
+                    token=token, secret_key=cfg.get("secret", ""),
                     verify=_verify_from_cfg(cfg))
 
 
@@ -79,7 +116,7 @@ def connect(cfg: dict):
 
 def list_connections(cfg: dict, org_id):
     """[(id, name)] of connections in an org (pick by name, no typos)."""
-    c = make_client(cfg, org_id)
+    c = make_client(cfg, org_id, match_org=True)
     data = c._post("/api/rest/2.0/metadata/search",
                    {"metadata": [{"type": "CONNECTION"}], "record_size": -1})
     items = data if isinstance(data, list) else data.get("metadata", [])
@@ -91,7 +128,7 @@ def fetch_databases(cfg: dict, org_id, conn_identifier):
     empty for connections this session can't introspect (e.g. OAuth/per-principal warehouses);
     in that case type the database name (you can read it from the connection's Edit page)."""
     try:
-        c = make_client(cfg, org_id)
+        c = make_client(cfg, org_id, match_org=True)
         data = c._post("/api/rest/2.0/connection/search",
                        {"connections": [{"identifier": conn_identifier}],
                         "data_warehouse_object_type": "DATABASE", "record_size": -1})
