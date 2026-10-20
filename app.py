@@ -9,6 +9,7 @@ Snapshot -> Variables -> Deploy.
 Run:  streamlit run app.py
 """
 import os
+import zlib
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -53,6 +54,28 @@ def _fmt_align_errors(errs):
         else:
             out.append(str(e))
     return "; ".join(out)
+
+
+def _pick_or_type(label: str, options, saved: str, key: str) -> str:
+    """A dropdown over `options` when there are any, else a text box. Never swaps a saved value
+    silently: one that isn't among the options stays selected (listed first) and is flagged, and
+    with nothing saved the dropdown starts empty instead of on the first option."""
+    saved = (saved or "").strip()
+    if not options:
+        return st.text_input(label, value=saved, key=f"{key}_txt")
+    opts = list(options)
+    missing = bool(saved) and saved not in opts
+    if missing:
+        opts = [saved] + opts
+    # Key on the option list as well: a new list (another connection or database) starts a fresh
+    # widget seeded from `saved`, rather than Streamlit holding a value the new list lacks.
+    sig = zlib.crc32("\x1f".join(opts).encode("utf-8"))
+    val = st.selectbox(label, opts, index=opts.index(saved) if saved else None,
+                       placeholder="Pick one", key=f"{key}_sel_{sig}")
+    if missing and val == saved:
+        st.warning(f"**{saved}** is what's saved, but it isn't in this list. Pick one from the "
+                   "list, or keep it if you know it's right.")
+    return val or ""
 
 
 def _drop_resolution_cache():
@@ -500,22 +523,44 @@ with tabs[0]:
                                 st.error(f"Couldn't list connections - {str(e)[:400]}")
                     conns = ss.get("conns", {}).get(oid, [])
                     with b1:
-                        if conns:
-                            names = [n for _, n in conns]
-                            conn_name = st.selectbox("Connection (in this org)", names,
-                                                     index=names.index(conn_name) if conn_name in names else 0, key=f"conn_{oid}")
-                            conn_id = next((i for i, n in conns if n == conn_name), None)
-                        else:
-                            conn_name = st.text_input("Connection name (in this org)", value=conn_name, key=f"connm_{oid}")
+                        conn_name = _pick_or_type("Connection (in this org)", [n for _, n in conns],
+                                                  conn_name, f"conn_{oid}")
+                        conn_id = next((i for i, n in conns if n == conn_name), None)
+                    # Databases and schemas are read from the connection itself, through ThoughtSpot.
+                    # Cached per (org, connection) so Streamlit's reruns don't re-query the warehouse.
+                    _conn_ref = conn_id or conn_name             # connection/search takes an id or a name
+                    _wh = ss.setdefault("wh", {}).setdefault((oid, _conn_ref), {})
+                    _wh_msg = None
                     d1, d2, d3 = st.columns([2, 2, 1])
-                    with d1:
-                        ts_db = st.text_input("Database (ts_db)", value=ts_db, key=f"db_{oid}")
-                    with d2:
-                        ts_schema = st.text_input("Schema (ts_schema)", value=ts_schema, key=f"schema_{oid}")
                     with d3:
-                        if st.button("Fetch dbs", key=f"fetch_{oid}"):
-                            dbs = ui_setup.fetch_databases(_cfg(), oid, conn_id) if conn_id else []
-                            st.info("DBs: " + (", ".join(dbs) if dbs else "(none returned - type it; read it off the connection's Edit page)"))
+                        if st.button("Fetch dbs", key=f"fetch_{oid}", disabled=not _conn_ref):
+                            with st.spinner("Reading databases…"):
+                                try:
+                                    _dbs, _auth = ui_setup.list_warehouse_objects(
+                                        _cfg(), oid, _conn_ref, "DATABASE")
+                                    _wh.update({"dbs": _dbs, "auth": _auth, "schemas": {}})
+                                    if not _dbs:
+                                        _wh_msg = ("info", "No databases came back from this connection, "
+                                                   "so type them in. This happens with a cold warehouse, "
+                                                   "a missing permission, or a per-user OAuth connection.")
+                                except Exception as e:
+                                    _wh_msg = ("error", f"Couldn't read databases - {str(e)[:300]}")
+                    with d1:
+                        ts_db = _pick_or_type("Database (ts_db)", _wh.get("dbs", []), ts_db, f"db_{oid}")
+                    # schemas follow the chosen database, read once per (connection, database)
+                    _sch = _wh.setdefault("schemas", {})
+                    if ts_db and ts_db in _wh.get("dbs", []) and ts_db not in _sch:
+                        with d2, st.spinner(f"Reading schemas in {ts_db}…"):
+                            try:
+                                _sch[ts_db], _ = ui_setup.list_warehouse_objects(
+                                    _cfg(), oid, _conn_ref, "SCHEMA", ts_db, _wh.get("auth", ""))
+                            except Exception:
+                                _sch[ts_db] = []
+                    with d2:
+                        ts_schema = _pick_or_type("Schema (ts_schema)", _sch.get(ts_db, []), ts_schema,
+                                                  f"schema_{oid}")
+                    if _wh_msg:
+                        getattr(st, _wh_msg[0])(_wh_msg[1])
 
                 new_cfg[oid] = {"name": id2name.get(oid, str(oid)), "role": roles,
                                 "connection": conn_name, "values": {"ts_db": ts_db, "ts_schema": ts_schema}}
