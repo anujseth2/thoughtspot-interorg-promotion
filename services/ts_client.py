@@ -22,6 +22,25 @@ def bearer_only(username: str = "", password: str = "", token: str = "",
     return bool(token) and not (secret_key and username) and not (username and password)
 
 
+# The org every ThoughtSpot cluster starts with. Its id is always 0, and it is the only org that
+# can manage Variables (a tenant org gets a 403).
+PRIMARY_ORG = "0"
+
+# ThoughtSpot error code for "user ... do not have access to org <id>": a token was requested
+# for an org the user is not a member of. Being an admin does not bypass it.
+NOT_ORG_MEMBER = 13090
+
+
+def ts_error_code(exc) -> Optional[int]:
+    """ThoughtSpot's own error code (e.g. 13090, 10003) from a failed REST call, or None.
+    The REST v2 error body is {"error": {"message": {"debug": {"code": <int>, ...}}}}."""
+    resp = getattr(exc, "response", None)
+    try:
+        return int(resp.json()["error"]["message"]["debug"]["code"])
+    except Exception:
+        return None
+
+
 _BEARER_ORG_CACHE: Dict[str, Tuple[str, str]] = {}
 
 

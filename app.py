@@ -255,10 +255,10 @@ with tabs[0]:
     ss = st.session_state
 
     st.markdown("### Step 1 - Primary connection  (prerequisite)")
-    st.caption("A trusted-auth secret (with an admin user) or an admin login for the **Primary** "
-               "org. Required first, and used for every org: it discovers all the orgs on the "
-               "cluster and mints a token per org as needed, so no per-org credentials are needed. "
-               "Step 2 unlocks once this connects.")
+    st.caption("A trusted-auth secret (with an admin user), bearer tokens, or an admin login. "
+               "Setup connects through the **Primary** org to discover the orgs on the cluster; a "
+               "secret key or login then reaches each org it is a member of, with no per-org "
+               "credentials. Step 2 unlocks once this connects.")
     host = st.text_input("Host", value=os.environ.get("TS_HOST", ""),
                          placeholder="https://your-instance.thoughtspot.cloud")
     _auth_opts = ["Secret key (trusted auth)", "Bearer token", "Username + password"]
@@ -289,9 +289,21 @@ with tabs[0]:
     else:
         user = st.text_input("Username", value=os.environ.get("TS_USER", ""))
         password = st.text_input("Password", value=os.environ.get("TS_PASSWORD", ""), type="password")
-    primary_org = st.text_input("Primary org id (the token connects here to list the orgs, and "
-                                "it manages variables unless an org below is tagged 'variables')",
-                                value=os.environ.get("TS_ORG_PRIMARY", "0"))
+    # Setup connects through the Primary org (always id 0) to list the cluster's orgs. Only when
+    # the user isn't a member of Primary does ThoughtSpot refuse that token; then, and only then,
+    # ask for an org the user does belong to. Bearer tokens reach only their own org, so no field.
+    connect_org = ""
+    _connect_msg = st.empty()          # a slot, so a successful connect can clear it in the same run
+    if not auth.startswith("Bearer") and (ss.get("need_connect_org")
+                                          or os.environ.get("TS_CONNECT_ORG", "").strip()):
+        if ss.get("connect_org_msg"):
+            _connect_msg.warning(ss["connect_org_msg"])
+        connect_org = st.text_input(
+            "Org to connect through (an org this user belongs to)",
+            value=os.environ.get("TS_CONNECT_ORG", ""), key="connect_org",
+            help="Only needed when the user isn't a member of the Primary org. Setup connects "
+                 "through this org to list the orgs on the cluster. Variables can still only be "
+                 "managed from the Primary org.")
 
     with st.expander("Network / SSL (only if behind a corporate proxy)"):
         st.caption("Use this if connecting fails with CERTIFICATE_VERIFY_FAILED. A TLS-inspection "
@@ -308,7 +320,7 @@ with tabs[0]:
     def _cfg() -> dict:
         return {"host": host.rstrip("/"), "user": user, "secret": secret, "token": token,
                 "target_token": target_token,
-                "password": password, "primary_org": primary_org,
+                "password": password, "connect_org": connect_org,
                 "ca_bundle": ca_bundle, "verify_ssl": verify_ssl,
                 "tag": ss.get("tag", ""), "resolve_local": ss.get("resolve_local", True),
                 "git_local_dir": ss.get("git_local_dir", ""),
@@ -332,6 +344,13 @@ with tabs[0]:
                             "and only reaches that org.")
             except Exception as _e:
                 st.warning(f"Couldn't read which org each bearer token belongs to - {str(_e)[:160]}")
+            ss.pop("connect_org_msg", None)
+            _connect_msg.empty()
+        except ui_setup.NotInConnectOrg as e:
+            ss.pop("connected", None); ss.pop("orgs", None)
+            ss["need_connect_org"] = True                # reveal the connect-org field above
+            ss["connect_org_msg"] = str(e)
+            st.rerun()
         except Exception as e:
             ss.pop("connected", None); ss.pop("orgs", None)
             st.error(f"Connection failed - {type(e).__name__}: {str(e)[:300]}")
@@ -449,11 +468,13 @@ with tabs[0]:
         for oid in participating:
             prev = ss["orgs_cfg"].get(oid, {})
             with st.expander(f"{id2name.get(oid, oid)}  ({oid})", expanded=True):
+                _role_opts = ["source", "target"]
                 roles = st.multiselect(
-                    "Role(s)", ["source", "variables", "target"], default=prev.get("role", []),
+                    "Role(s)", _role_opts,
+                    default=[r for r in prev.get("role", []) if r in _role_opts],
                     key=f"role_{oid}",
-                    help="source = snapshot FROM;  variables = manages the TABLE_MAPPING "
-                         "variables (the Primary org);  target = deploy TO")
+                    help="source = snapshot FROM;  target = deploy TO. Variables are always "
+                         "managed in the Primary org, so they need no role.")
                 # Bearer tokens are bound to one org each: flag a role whose token is elsewhere,
                 # since the snapshot / deploy for it would be refused (pipeline._require_bearer_org).
                 for _r, _verb in (("source", "snapshot from"), ("target", "deploy to")):
